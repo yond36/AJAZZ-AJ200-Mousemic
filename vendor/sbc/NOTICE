@@ -1,0 +1,9 @@
+sbc — Bluetooth low-complexity, subband codec (SBC) library
+Vendored from https://github.com/nefarius/libsbc (fork of bluez sbc,
+modified to build natively on Windows with MSVC).
+
+Upstream: https://github.com/bluez/sbc  (git.kernel.org pub/scm/bluetooth/sbc.git)
+License: LGPL-2.1-or-later  (see LICENSE.LGPL)
+
+Used here to decode mSBC frames (HFP, 16kHz mono) from the AJAZZ voice mouse.
+Only the decoder path (sbc_init_msbc / sbc_decode) is exercised at runtime.

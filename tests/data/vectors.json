@@ -1,0 +1,34 @@
+{
+  "sample_rate": 16000,
+  "channels": 1,
+  "bits": 16,
+  "format": "s16le",
+  "codesize": 240,
+  "framelen": 57,
+  "n_frames": 240,
+  "pcm_input_bytes": 57600,
+  "pcm_ref_bytes": 57600,
+  "segments": [
+    {
+      "index": 0,
+      "kind": "silence",
+      "frames": 60
+    },
+    {
+      "index": 1,
+      "kind": "sine_1k_-20dBFS",
+      "frames": 60
+    },
+    {
+      "index": 2,
+      "kind": "white_noise",
+      "frames": 60
+    },
+    {
+      "index": 3,
+      "kind": "sine_plus_noise",
+      "frames": 60
+    }
+  ],
+  "source": "libsbc.dll (BlueZ sbc reference) encode->decode"
+}

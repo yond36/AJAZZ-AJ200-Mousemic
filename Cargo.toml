@@ -1,0 +1,77 @@
+[package]
+name = "mousemic-rs"
+version = "0.1.0"
+edition = "2021"
+description = "AJAZZ 语音鼠标 (VID=363C) 桥接为普通麦克风 — Rust 重写版"
+license = "MIT"
+default-run = "MouseMic"
+
+[lib]
+name = "mousemic_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "MouseMic"
+path = "src/main.rs"
+
+[features]
+default = ["gui"]
+# gui: 启用 native-windows-gui 原生 Win32 图形界面 + 系统托盘。
+# 用 GDI 原生控件 (系统字体, 不读字体文件进内存), 内存占用远低于 egui GPU 方案。
+# 关闭后可只构建命令行/库 (cargo build --no-default-features)。
+gui = ["dep:native-windows-gui", "dep:native-windows-derive"]
+
+[dependencies]
+# HID 通信 (封装 hidapi C 库, 构建时需 C 编译器)
+hidapi = "2.6"
+# 音频输出 (WASAPI / 跨平台)
+cpal = "0.15"
+# 配置 (JSON 序列化)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 命令行解析
+clap = { version = "4", features = ["derive"] }
+# 错误处理
+anyhow = "1"
+# Ctrl+C 干净退出 (headless CLI)
+ctrlc = "3"
+# 日志
+log = "0.4"
+simplelog = "0.12"
+# Windows 注册表 (自启)
+winreg = "0.52"
+# Windows API: SendInput(热键注入) / CreateMutex(单实例) / LoadLibrary(Interception 驱动)
+windows = { version = "0.58", features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+] }
+# 运行时动态加载 (仅 hotkey.rs 的 Interception 驱动后端使用)
+libloading = "0.8"
+
+# GUI (可选, 受 gui feature 控制): 原生 Win32 控件 (native-windows-gui),
+# 用系统 GDI 字体, 不把字体文件读进内存, 运行时内存开销极小。
+native-windows-gui = { version = "1.0", optional = true }
+native-windows-derive = { version = "1.0", optional = true }
+
+[build-dependencies]
+# 静态编译 vendored sbc (BlueZ SBC/mSBC codec, nefarius/libsbc fork) 供 msbc 模块 FFI
+cc = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
+# 说明: mSBC 解码使用 vendored BlueZ sbc (nefarius/libsbc fork), 由 build.rs
+# 静态编译进二进制, 无需外部 DLL。与原 Python 版调 libsbc.dll 行为一致
+# (同一份 C 源码)。见 vendor/sbc/NOTICE。
+#
+# GUI 使用 native-windows-gui (Win32 原生控件 + GDI 系统字体), 不创建 OpenGL
+# 上下文、不把字体文件读进内存。运行时内存 ~22MB (egui GPU 方案 ~112MB),
+# 与 Python tkinter 版 (~30MB) 相当甚至更低。
