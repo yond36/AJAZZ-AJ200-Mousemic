@@ -26,7 +26,7 @@
 
 ```bash
 # 需要 Rust 1.75+ 和 MSVC 编译工具链
-git clone https://github.com/xotox/AJAZZ-AJ200-Mousemic.git
+git clone https://github.com/xugui0821/AJAZZ-AJ200-Mousemic.git
 cd AJAZZ-AJ200-Mousemic
 cargo build --release
 ```
