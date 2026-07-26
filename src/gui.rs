@@ -148,7 +148,7 @@ pub struct GuiApp {
     #[nwg_control(parent: window, size: (540, 260), position: (20, 254), flags: "VISIBLE|BORDER")]
     settings_frame: nwg::Frame,
 
-    #[nwg_control(parent: settings_frame, text: "输出模式:", position: (10, 24), size: (85, 22))]
+    #[nwg_control(parent: settings_frame, text: "输出模式", position: (10, 24), size: (75, 22))]
     lbl_mode: nwg::Label,
     #[nwg_control(parent: settings_frame, text: "扬声器试听", position: (100, 24), size: (120, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_mode_change] )]
@@ -159,22 +159,22 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, text: "", position: (10, 50), size: (520, 40))]
     lbl_mode_hint: nwg::Label,
 
-    #[nwg_control(parent: settings_frame, text: "设备名:", position: (10, 96), size: (60, 22))]
+    #[nwg_control(parent: settings_frame, text: "设备名", position: (10, 97), size: (55, 22))]
     lbl_dev: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (300, 28), position: (80, 94))]
+    #[nwg_control(parent: settings_frame, size: (300, 28), position: (70, 94))]
     cb_cable: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "前进键:", position: (10, 130), size: (60, 22))]
+    #[nwg_control(parent: settings_frame, text: "前进键", position: (10, 131), size: (55, 22))]
     lbl_hotkey_fwd: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (115, 28), position: (70, 128))]
+    #[nwg_control(parent: settings_frame, size: (110, 28), position: (70, 128))]
     cb_hotkey_fwd: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "后退键:", position: (195, 130), size: (60, 22))]
+    #[nwg_control(parent: settings_frame, text: "后退键", position: (200, 131), size: (55, 22))]
     lbl_hotkey_bwd: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (115, 28), position: (255, 128))]
+    #[nwg_control(parent: settings_frame, size: (110, 28), position: (260, 128))]
     cb_hotkey_bwd: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "注入:", position: (380, 130), size: (42, 22))]
+    #[nwg_control(parent: settings_frame, text: "注入", position: (380, 131), size: (35, 22))]
     lbl_driver: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (105, 28), position: (422, 128))]
+    #[nwg_control(parent: settings_frame, size: (120, 28), position: (415, 128))]
     cb_driver: nwg::ComboBox<String>,
 
     // ---- Typeless 模式 ----
@@ -188,16 +188,16 @@ pub struct GuiApp {
     chk_typeless_bwd: nwg::CheckBox,
 
     // ---- 自动回车 ----
-    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 196), size: (85, 22))]
+    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 197), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
     chk_auto_enter: nwg::CheckBox,
     #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 194))]
     cb_auto_enter_mode: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "延迟", position: (220, 196), size: (38, 22))]
+    #[nwg_control(parent: settings_frame, text: "延迟", position: (220, 197), size: (38, 22))]
     lbl_auto_delay: nwg::Label,
     #[nwg_control(parent: settings_frame, text: "0.5", position: (260, 196), size: (38, 24))]
     txt_auto_delay: nwg::TextInput,
-    #[nwg_control(parent: settings_frame, text: "秒", position: (302, 196), size: (25, 22))]
+    #[nwg_control(parent: settings_frame, text: "秒", position: (302, 197), size: (25, 22))]
     lbl_auto_unit: nwg::Label,
 
     #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 228), size: (85, 22))]
