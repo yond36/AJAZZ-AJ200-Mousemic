@@ -93,6 +93,8 @@ impl Bridge {
         self.hotkey_engaged_key = None;
         self.active_key = None;
         if let Some(ref ctrl) = self.control {
+            // 发送禁用 AI 键命令, 恢复前进/后退默认行为
+            std::thread::sleep(Duration::from_millis(20));
             hid::ai_off(ctrl);
         }
         self.decoder = None;
@@ -110,11 +112,13 @@ impl Bridge {
         let connected = hid::connect_audio(&self.api, &self.wired, &self.wireless, exclude_path, log);
         let Some(c) = connected else { return false; };
 
-        // 按配置决定哪些键启用 AI
-        let fwd_enabled = self.hotkey_fwd_name.is_some();
-        let bwd_enabled = self.hotkey_bwd_name.is_some();
+        // 启动时开启双键 AI
         if let Some(ref ctrl) = c.control {
-            hid::set_ai_keys(ctrl, fwd_enabled, bwd_enabled);
+            std::thread::sleep(Duration::from_millis(50));
+            hid::ai_on(ctrl);
+            log("AI键配置: 前进=AI 后退=AI");
+        } else {
+            log("警告: 未找到 control 接口 (usage_page=0xFFA0), AI键配置无法生效");
         }
 
         self.audio = Some(c.audio);
@@ -236,8 +240,12 @@ impl Bridge {
                 None => { std::thread::sleep(Duration::from_millis(200)); continue; }
             };
 
+            // 标记本轮是否收到有效音频包
+            let mut got_audio = false;
+
             match read_res {
                 Ok(n) if n == 64 && buf[0] == crate::REPORT_ID && buf[2] == crate::AUDIO_PAYLOAD_LEN => {
+                    got_audio = true;
                     if self.decoder.is_none() {
                         match MsbcDecoder::new() {
                             Ok(d) => { self.decoder = Some(d); log("检测到语音输入, 已启动音频解码。"); self.audio_started = true; }
@@ -308,8 +316,10 @@ impl Bridge {
                 }
             }
 
-            // ---- 轮询 Consumer Control (0x0C 按键事件, 放音频后以免干扰) ----
-            self.poll_consumer();
+            // ---- 轮询 Consumer Control (仅在音频空闲时, 避免干扰音频流) ----
+            if !got_audio {
+                self.poll_consumer();
+            }
 
             // ---- 周期性汇报 ----
             let t = self.start.elapsed().as_secs_f64();
@@ -351,6 +361,9 @@ impl Bridge {
                 }
             }
         }
+
+        // 退出时恢复 AI 键为默认 (禁用)
+        self.disconnect();
 
         if self.audio_started { log(&format!("已处理 {} 个语音包。", self.n_pkts)); }
         log(if stop.load(Ordering::SeqCst) { "桥接已正常停止。" } else { "桥接已退出。" });

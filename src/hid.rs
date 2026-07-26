@@ -198,17 +198,8 @@ pub struct Connected {
     pub product_string: String,
 }
 
-/// 设置 AI 键: fwd=true 启用前进键AI, bwd=true 启用后退键AI。
-/// 匹配 ai_key_control.js 协议。
-pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
-    // mask = 要配置的键 (bit4=前进, bit3=后退), enable = AI 总开关
-    let (mask, enable, bw_short, bw_long, fw_short, fw_long) = match (fwd, bwd) {
-        (true, true)   => (0x18u8, 0x01u8, 0u8, 0u8, 0u8, 0u8),
-        (true, false)  => (0x10u8, 0x01u8, 1u8, 1u8, 0u8, 0u8),
-        (false, true)  => (0x08u8, 0x01u8, 0u8, 0u8, 2u8, 2u8),
-        (false, false) => (0x18u8, 0x00u8, 1u8, 1u8, 2u8, 2u8), // mask=0x18!
-    };
-
+/// 发送一条 AI 键配置报告 (内部辅助)。
+fn send_ai_report(control: &HidDevice, mask: u8, enable: u8, bw_short: u8, bw_long: u8, fw_short: u8, fw_long: u8) -> bool {
     let mut report = [0u8; 32];
     report[0] = 0x0b;
     report[1] = 0x55;
@@ -219,6 +210,30 @@ pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
     let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,bw_short,bw_long, 0x10,fw_short,fw_long, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
     control.write(&report).unwrap_or(0) == 32
+}
+
+/// 设置 AI 键: fwd=true 启用前进键AI, bwd=true 启用后退键AI。
+/// 启用时直接发对应 mask 的 enable 命令, 不影响未选中的键;
+/// 全禁 (fwd=false, bwd=false) 用于停止时恢复默认前进/后退。
+pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
+    match (fwd, bwd) {
+        (false, false) => {
+            // 停止: 禁用全部 AI 键, 恢复默认 (bwShort=1,bwLong=1, fwShort=2,fwLong=2)
+            send_ai_report(control, 0x18, 0x00, 1, 1, 2, 2)
+        }
+        (true, true) => {
+            // 两键都启用 AI
+            send_ai_report(control, 0x18, 0x01, 0, 0, 0, 0)
+        }
+        (true, false) => {
+            // 仅前进=AI, 不动后退
+            send_ai_report(control, 0x10, 0x01, 0, 0, 0, 0)
+        }
+        (false, true) => {
+            // 仅后退=AI, 不动前进
+            send_ai_report(control, 0x08, 0x01, 0, 0, 0, 0)
+        }
+    }
 }
 
 pub fn ai_on(control: &HidDevice) -> bool { set_ai_keys(control, true, true) }
@@ -252,8 +267,7 @@ pub fn connect_audio(
                 let control = api.device_list()
                     .filter(|dd| dd.vendor_id() == 0x363C
                         && dd.product_id() == d.product_id
-                        && dd.usage_page() == 0xffa0
-                        && dd.usage() == 0x0002)
+                        && dd.usage_page() == 0xffa0)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
                 let consumer = api.device_list()
                     .filter(|dd| dd.vendor_id() == 0x363C

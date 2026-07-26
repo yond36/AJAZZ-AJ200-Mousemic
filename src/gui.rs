@@ -768,12 +768,22 @@ impl GuiApp {
     }
 
     fn stop_bridge(&self) {
-        let st = self.state.borrow();
-        if let Some(stop) = &st.stop {
+        let (stop, handle) = {
+            let mut st = self.state.borrow_mut();
+            let stop = st.stop.take();
+            let handle = st.bridge_thread.take();
+            (stop, handle)
+        };
+        if let Some(stop) = &stop {
             stop.store(true, Ordering::SeqCst);
         }
-        drop(st);
-        self.append_log("正在停止...");
+        // 等待桥接线程退出 (确保 disconnect/ai_off 执行完毕)
+        if let Some(h) = handle {
+            let _ = h.join();
+        }
+        self.state.borrow_mut().running = false;
+        self.update_run_state_ui(false);
+        self.append_log("桥接已停止。");
     }
 }
 
