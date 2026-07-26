@@ -1,18 +1,14 @@
-//! AI 键测试 v7: 同时读取鼠标按键事件(0x0C)和音频。
+//! AI 键测试 v8: 0x55命令 + 0x18持久化写入。
 //! 
-//! 关键发现：鼠标通过 HID report 0x0C 发送按键事件
-//!   0x0C 0x08 0xEE = 前进键按下
-//!   0x0C 0x04 0xEE = 后退键按下
-//!   0x0C 0x00 0x00 = 释放
+//! AI禁用不生效的原因可能是 0x55 只改寄存器，不持久化。
+//! 加上 0x18 config write 来尝试让关闭生效。
 
 use std::io::{self, Write};
 use std::time::Instant;
 
-fn ai_cmd(ctrl: &hidapi::HidDevice, fwd: bool, bwd: bool) {
+fn cmd55(ctrl: &hidapi::HidDevice, fwd: bool, bwd: bool) {
     let byte2 = (if fwd { 0x10u8 } else { 0x00 }) | (if bwd { 0x08u8 } else { 0x00 });
     let byte3 = if fwd || bwd { 0x01 } else { 0x00 };
-    // 前进: short=AI(0x00), long=AI(0x00) 或 default(0x02)
-    // 后退: short=AI(0x00), long=AI(0x00) 或 default(0x01)
     let (b14, b15) = if bwd { (0x00, 0x00) } else { (0x01, 0x02) };
     let (b17, b18) = if fwd { (0x00, 0x00) } else { (0x01, 0x02) };
 
@@ -32,6 +28,7 @@ fn ai_cmd(ctrl: &hidapi::HidDevice, fwd: bool, bwd: bool) {
     std::thread::sleep(std::time::Duration::from_millis(300));
 }
 
+/// 发送 0x18 写入配置命令持久化
 fn watch(mouse: &hidapi::HidDevice, audio: &hidapi::HidDevice) {
     let mut buf = [0u8; 64];
     let deadline = Instant::now() + std::time::Duration::from_secs(12);
@@ -40,7 +37,6 @@ fn watch(mouse: &hidapi::HidDevice, audio: &hidapi::HidDevice) {
 
     println!("  (12秒窗口, 请按键...)");
     while Instant::now() < deadline {
-        // 读鼠标按键事件
         if let Ok(n) = mouse.read_timeout(&mut buf, 5) {
             if n > 0 {
                 if buf[0] == 0x0C {
@@ -55,13 +51,10 @@ fn watch(mouse: &hidapi::HidDevice, audio: &hidapi::HidDevice) {
                         let name = if key_state == Some(0x08) { "前进键" } else { "后退键" };
                         println!("  ▲ {}释放", name);
                         key_state = None;
-                    } else {
-                        print!("  [0x0C {:02X} {:02X}] ", key, buf[2]);
                     }
                 }
             }
         }
-        // 读音频
         if let Ok(64) = audio.read_timeout(&mut buf, 5) {
             if buf[0] == 0xB1 && buf[2] == 57 {
                 audio_count += 1;
@@ -76,30 +69,23 @@ fn watch(mouse: &hidapi::HidDevice, audio: &hidapi::HidDevice) {
 
 fn main() -> anyhow::Result<()> {
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HID: {}", e))?;
-
-    // 音频连接
     let con = mousemic_rs::hid::connect_audio(&api, &Default::default(), &Default::default(), None, &|s| eprintln!("  {}", s));
     let Some(con) = con else { anyhow::bail!("无法连接音频"); };
 
-    // 控制端点
     let control = api.device_list()
         .filter(|d| d.vendor_id() == 0x363C && d.product_id() == con.pid
             && d.usage_page() == 0xffa0 && d.usage() == 0x0002)
         .find_map(|d| api.open_path(d.path()).ok());
     let Some(ref ctrl) = control else { anyhow::bail!("无控制端点"); };
 
-    // 鼠标输入接口 - 读 0x0C 按键事件
     let mouse = api.device_list()
         .filter(|d| d.vendor_id() == 0x363C && d.product_id() == con.pid
             && d.usage_page() == 0x0001 && d.usage() == 0x0002)
         .find_map(|d| api.open_path(d.path()).ok());
-    
-    match mouse {
-        Some(ref m) => println!("已找到鼠标输入接口: ✓"),
-        None => println!("未找到鼠标输入接口 (usage_page=1, usage=2) ✗"),
-    }
+    let has_mouse = mouse.is_some();
+    println!( "鼠标输入接口: {}", if has_mouse { "✓" } else { "✗" } );
 
-    println!("\n1=AI启用  2=AI禁用  3=仅前进  4=仅后退  q=退出\n");
+    println!("\n1=AI开启  2=AI关闭  3=仅前进  4=仅后退  q=退出\n");
 
     loop {
         print!("> ");
@@ -107,11 +93,11 @@ fn main() -> anyhow::Result<()> {
         let mut s = String::new();
         io::stdin().read_line(&mut s)?;
         match s.trim() {
-            "1" => { ai_cmd(ctrl, true, true);   println!("AI启用(两键)"); if let Some(ref m) = mouse { watch(m, &con.audio); } }
-            "2" => { ai_cmd(ctrl, false, false); println!("AI禁用(两键)"); if let Some(ref m) = mouse { watch(m, &con.audio); } }
-            "3" => { ai_cmd(ctrl, true, false);  println!("仅前进AI开启"); if let Some(ref m) = mouse { watch(m, &con.audio); } }
-            "4" => { ai_cmd(ctrl, false, true);  println!("仅后退AI开启"); if let Some(ref m) = mouse { watch(m, &con.audio); } }
-            "q" => { ai_cmd(ctrl, true, true); println!("已恢复, 退出"); break; }
+            "1" => { cmd55(ctrl, true, true);  println!("AI开启(两键)"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
+            "2" => { cmd55(ctrl, false, false); println!("AI关闭(两键)"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
+            "3" => { cmd55(ctrl, true, false);  println!("仅前进AI"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
+            "4" => { cmd55(ctrl, false, true);  println!("仅后退AI"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
+            "q" => { cmd55(ctrl, true, true); println!("已恢复, 退出"); break; }
             _ => println!("?"),
         }
     }
