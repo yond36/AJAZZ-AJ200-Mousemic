@@ -7,21 +7,35 @@
 use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
-    let target_pid: u16 = std::env::args()
+    let target_pid: Option<u16> = std::env::args()
         .nth(1)
-        .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
-        .unwrap_or(0xED03);
+        .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok());
 
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HID init: {}", e))?;
 
-    // 找所有 usage_page=0xFFAA 设备, 按 PID 过滤
+    // 搜索所有 usage_page=0xFFAA 设备, 可选按 PID 过滤
     let devices: Vec<_> = api
         .device_list()
-        .filter(|d| d.usage_page() == 0xFFAA && d.product_id() == target_pid)
+        .filter(|d| d.usage_page() == 0xFFAA && target_pid.map_or(true, |pid| d.product_id() == pid))
         .collect();
 
     if devices.is_empty() {
-        anyhow::bail!("未找到 PID={:#06X} usage_page=0xFFAA 设备", target_pid);
+        // 列出所有 usage_page=0xFFAA 设备帮助诊断
+        let all: Vec<_> = api.device_list().filter(|d| d.usage_page() == 0xFFAA).collect();
+        if all.is_empty() {
+            anyhow::bail!("未找到任何 usage_page=0xFFAA 设备。请确认鼠标已连接(无线接收器或数据线)。");
+        }
+        println!("找到 {} 个 usage_page=0xFFAA 设备, 但 PID 不匹配:", all.len());
+        for d in &all {
+            println!(
+                "  PID={:#06X}  usage={:#06X}  iface={}  {}",
+                d.product_id(), d.usage(), d.interface_number(),
+                d.product_string().unwrap_or("?")
+            );
+        }
+        println!("\n请用正确的 PID 重试: cargo run --bin KeyTest -- <PID>");
+        println!("例如: cargo run --bin KeyTest -- 0x{:04X}", all[0].product_id());
+        return Ok(());
     }
 
     println!("找到 {} 个匹配设备:", devices.len());
