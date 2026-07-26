@@ -47,6 +47,7 @@ pub struct Bridge {
     ai_mode_a: bool,        // true=键A激活, false=键B激活
     ai_mode_locked: bool,   // 音频活跃时锁住模式不切换
     last_ai_switch: f64,
+    dual_mode: bool,        // 双键模式才交替, 单键锁定
     // 运行期统计
     n_pkts: u64,
     n_dec_ok: u64,
@@ -89,6 +90,8 @@ impl Bridge {
             }
         }
 
+        let dual_mode = hotkey_a.is_some() && hotkey_b.is_some();
+
         Ok(Bridge {
             api,
             wired,
@@ -107,6 +110,7 @@ impl Bridge {
             ai_mode_a: true,
             ai_mode_locked: false,
             last_ai_switch: 0.0,
+            dual_mode,
             n_pkts: 0,
             n_dec_ok: 0,
             n_dec_fail: 0,
@@ -160,11 +164,27 @@ impl Bridge {
         self.current_pid = c.pid;
         self.current_ps = c.product_string;
 
-        // 初始 AI 键模式设为 A
-        self.ai_mode_a = true;
-        self.ai_mode_locked = false;
-        if let Some(ref ctrl) = self.control {
-            hid::set_ai_key_mode(ctrl, true);
+        // 初始 AI 键模式: 双键模式默认 A, 单键模式按配置锁定
+        if self.dual_mode {
+            self.ai_mode_a = true;
+            self.ai_mode_locked = false;
+            if let Some(ref ctrl) = self.control {
+                hid::set_ai_key_mode(ctrl, true);
+            }
+        } else if self.hotkey_a.is_some() {
+            // 只有键 A → 锁在 A 模式
+            self.ai_mode_a = true;
+            self.ai_mode_locked = true;
+            if let Some(ref ctrl) = self.control {
+                hid::set_ai_key_mode(ctrl, true);
+            }
+        } else if self.hotkey_b.is_some() {
+            // 只有键 B → 锁在 B 模式
+            self.ai_mode_a = false;
+            self.ai_mode_locked = true;
+            if let Some(ref ctrl) = self.control {
+                hid::set_ai_key_mode(ctrl, false);
+            }
         }
 
         match MsbcDecoder::new() {
@@ -379,7 +399,9 @@ impl Bridge {
                 if let Some(hk) = &mut self.hotkey_a { hk.release(); }
                 if let Some(hk) = &mut self.hotkey_b { hk.release(); }
                 self.hotkey_engaged = false;
-                self.ai_mode_locked = false;
+                if self.dual_mode {
+                    self.ai_mode_locked = false;
+                }
                 // 热键刚松开 → 记录语音结束时刻 (用于自动回车)
                 if self.auto_enter && self.voice_ended_at.is_none() {
                     self.voice_ended_at = Some(Instant::now());
@@ -389,9 +411,9 @@ impl Bridge {
                 }
             }
 
-            // ---- AI 键模式切换 (无音频时轮询两个键) ----
+            // ---- AI 键模式切换 (双键模式且无音频时轮询) ----
             let now = self.start.elapsed().as_secs_f64();
-            if !self.ai_mode_locked && self.control.is_some() && now - self.last_ai_switch > 0.2 {
+            if self.dual_mode && !self.ai_mode_locked && self.control.is_some() && now - self.last_ai_switch > 0.3 {
                 self.last_ai_switch = now;
                 self.ai_mode_a = !self.ai_mode_a;
                 if let Some(ref ctrl) = self.control {

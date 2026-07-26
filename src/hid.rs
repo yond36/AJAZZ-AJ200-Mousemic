@@ -199,6 +199,7 @@ pub struct Connected {
 
 /// 切换 AI 语音键映射模式。
 /// mode=true → 键A 激活, mode=false → 键B 激活。
+/// 发送两次确保生效 (与 happyme531/aj200-mic 行为一致)。
 pub fn set_ai_key_mode(control: &HidDevice, mode: bool) -> bool {
     let mut report = [0u8; 64];
     report[0] = 0x0b;           // 控制端点 report ID
@@ -206,11 +207,13 @@ pub fn set_ai_key_mode(control: &HidDevice, mode: bool) -> bool {
     report[2] = 26;             // 0x1A
     report[3] = 24;             // 0x18
     report[4] = if mode { 1 } else { 0 };  // AI key mode
-    // 剩余 payload (与 happyme531/aj200-mic 一致)
     let payload: [u8; 24] = [1,0,0,2,0,0,4,0,0,8,0,0,16,0,0,32,0,0,64,0,0,128,0,0];
     for (i, b) in payload.iter().enumerate() {
         report[5 + i] = *b;
     }
+    // 发送两次, 间隔 50ms
+    if control.write(&report).unwrap_or(0) != 64 { return false; }
+    std::thread::sleep(std::time::Duration::from_millis(50));
     control.write(&report).unwrap_or(0) == 64
 }
 
