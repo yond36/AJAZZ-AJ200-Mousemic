@@ -15,7 +15,15 @@ pub struct Config {
     pub mode: String,
     /// 虚拟声卡输入设备名, 如 "CABLE Input"。
     pub cable_device: String,
-    /// 联动热键名; None = 不联动。可选值见 [`crate::hotkey::HOTKEYS`]。
+    /// 联动热键名 (键A); None = 不联动。可选值见 [`crate::hotkey::HOTKEY_NAMES`]。
+    /// 兼容旧配置: 若 hotkey_a 未设则回退到 hotkey。
+    #[serde(default)]
+    pub hotkey_a: Option<String>,
+    /// 联动热键名 (键B); None = 不联动。
+    #[serde(default)]
+    pub hotkey_b: Option<String>,
+    /// 旧配置兼容: 加载后若 hotkey_a 为空则取此值。
+    #[serde(default)]
     pub hotkey: Option<String>,
     /// 热键注入方式: "sendinput" | "interception"。
     pub driver: String,
@@ -48,6 +56,8 @@ impl Default for Config {
         Config {
             mode: default_mode(),
             cable_device: default_cable(),
+            hotkey_a: None,
+            hotkey_b: None,
             hotkey: Some("right_alt".to_string()),
             driver: default_driver(),
             minimize_to_tray: false,
@@ -91,6 +101,15 @@ impl Config {
 
     pub fn wired_pids(&self) -> std::collections::HashSet<u16> { Self::coerce_pids(&self.wired_pids) }
     pub fn wireless_pids(&self) -> std::collections::HashSet<u16> { Self::coerce_pids(&self.wireless_pids) }
+
+    /// 解析有效热键 A: 优先 hotkey_a, 否则回退到旧字段 hotkey。
+    pub fn effective_hotkey_a(&self) -> Option<String> {
+        self.hotkey_a.clone().or_else(|| self.hotkey.clone())
+    }
+    /// 解析有效热键 B
+    pub fn effective_hotkey_b(&self) -> Option<String> {
+        self.hotkey_b.clone()
+    }
 
     pub fn load() -> Config {
         let mut cfg = match std::fs::read_to_string(Self::config_path()) {

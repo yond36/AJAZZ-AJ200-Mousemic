@@ -41,7 +41,8 @@ struct AppState {
     // 配置镜像 (UI 即时态, 改了就写回 JSON)
     mode_play: bool,
     cable_device: String,
-    hotkey: String,
+    hotkey_a: String,
+    hotkey_b: String,
     driver: String,
     autostart_on: bool,
     minimize_to_tray: bool,
@@ -78,7 +79,8 @@ impl Default for AppState {
         AppState {
             mode_play: true,
             cable_device: "CABLE Input".to_string(),
-            hotkey: "无".to_string(),
+            hotkey_a: "无".to_string(),
+            hotkey_b: "无".to_string(),
             driver: "sendinput".to_string(),
             autostart_on: false,
             minimize_to_tray: false,
@@ -106,7 +108,7 @@ pub struct GuiApp {
     state: RefCell<AppState>,
 
     // ---- 顶层窗口 ----
-    #[nwg_control(size: (580, 750), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_control(size: (580, 780), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
     #[nwg_events( OnWindowClose: [GuiApp::on_close] )]
     window: nwg::Window,
 
@@ -137,7 +139,7 @@ pub struct GuiApp {
     btn_install_deps: nwg::Button,
 
     // ---- 设置 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 230), position: (20, 254), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 260), position: (20, 254), flags: "VISIBLE|BORDER")]
     settings_frame: nwg::Frame,
 
     #[nwg_control(parent: settings_frame, text: "输出模式:", position: (10, 24), size: (85, 22))]
@@ -156,55 +158,60 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, size: (300, 28), position: (80, 94))]
     cb_cable: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "联动键:", position: (10, 128), size: (70, 22))]
-    lbl_hotkey: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (170, 28), position: (80, 126))]
-    cb_hotkey: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "联动键A:", position: (10, 128), size: (75, 22))]
+    lbl_hotkey_a: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (170, 28), position: (85, 126))]
+    cb_hotkey_a: nwg::ComboBox<String>,
 
     #[nwg_control(parent: settings_frame, text: "注入方式:", position: (270, 128), size: (80, 22))]
     lbl_driver: nwg::Label,
     #[nwg_control(parent: settings_frame, size: (120, 28), position: (350, 126))]
     cb_driver: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 194), size: (85, 22))]
+    #[nwg_control(parent: settings_frame, text: "联动键B:", position: (10, 158), size: (75, 22))]
+    lbl_hotkey_b: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (170, 28), position: (85, 156))]
+    cb_hotkey_b: nwg::ComboBox<String>,
+
+    #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 224), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_autostart_change] )]
     chk_autostart: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 194), size: (155, 22))]
+    #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 224), size: (155, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
     chk_minimize: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "自动起桥接", position: (260, 194), size: (105, 22))]
+    #[nwg_control(parent: settings_frame, text: "自动起桥接", position: (260, 224), size: (105, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
     chk_autostart_svc: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "调试日志", position: (370, 194), size: (90, 22))]
+    #[nwg_control(parent: settings_frame, text: "调试日志", position: (370, 224), size: (90, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_debug_change] )]
     chk_debug: nwg::CheckBox,
 
     // ---- 自动回车 ----
-    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 164), size: (85, 22))]
+    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 194), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
     chk_auto_enter: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 162))]
+    #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 192))]
     cb_auto_enter_mode: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "延迟", position: (218, 164), size: (38, 22))]
+    #[nwg_control(parent: settings_frame, text: "延迟", position: (218, 194), size: (38, 22))]
     lbl_auto_delay: nwg::Label,
-    #[nwg_control(parent: settings_frame, text: "0.5", position: (258, 164), size: (35, 24))]
+    #[nwg_control(parent: settings_frame, text: "0.5", position: (258, 194), size: (35, 24))]
     txt_auto_delay: nwg::TextInput,
-    #[nwg_control(parent: settings_frame, text: "秒", position: (298, 164), size: (30, 22))]
+    #[nwg_control(parent: settings_frame, text: "秒", position: (298, 194), size: (30, 22))]
     lbl_auto_unit: nwg::Label,
 
     // ---- 启停按钮 (直接在 window 上) ----
-    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 494), size: (130, 36))]
+    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 524), size: (130, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::start_bridge] )]
     btn_start: nwg::Button,
-    #[nwg_control(parent: window, text: "■ 停止", position: (160, 494), size: (130, 36))]  
+    #[nwg_control(parent: window, text: "■ 停止", position: (160, 524), size: (130, 36))]  
     #[nwg_events( OnButtonClick: [GuiApp::stop_bridge] )]
     btn_stop: nwg::Button,
-    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 494), size: (140, 36))]
+    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 524), size: (140, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::hide_to_tray] )]
     btn_hide: nwg::Button,
 
     // ---- 日志 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 190), position: (20, 544), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 190), position: (20, 574), flags: "VISIBLE|BORDER")]
     log_frame: nwg::Frame,
     #[nwg_control(parent: log_frame, position: (10, 24), size: (520, 150), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
     log_box: nwg::TextBox,
@@ -243,7 +250,8 @@ impl GuiApp {
         let cfg = Config::load();
         state.mode_play = cfg.mode == "play";
         state.cable_device = cfg.cable_device.clone();
-        state.hotkey = cfg.hotkey.clone().unwrap_or_else(|| "无".to_string());
+        state.hotkey_a = cfg.effective_hotkey_a().unwrap_or_else(|| "无".to_string());
+        state.hotkey_b = cfg.effective_hotkey_b().unwrap_or_else(|| "无".to_string());
         state.driver = cfg.driver.clone();
         state.autostart_on = cfg.autostart;
         state.minimize_to_tray = cfg.minimize_to_tray;
@@ -273,13 +281,12 @@ impl GuiApp {
         let st = self.state.borrow();
 
         // 填充下拉框
-        self.cb_hotkey.set_collection(st.hotkey_items.clone());
-        let hk_idx = st
-            .hotkey_items
-            .iter()
-            .position(|h| h == &st.hotkey)
-            .unwrap_or(0);
-        self.cb_hotkey.set_selection(Some(hk_idx));
+        self.cb_hotkey_a.set_collection(st.hotkey_items.clone());
+        let hk_a_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_a).unwrap_or(0);
+        self.cb_hotkey_a.set_selection(Some(hk_a_idx));
+        self.cb_hotkey_b.set_collection(st.hotkey_items.clone());
+        let hk_b_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_b).unwrap_or(0);
+        self.cb_hotkey_b.set_selection(Some(hk_b_idx));
 
         self.cb_driver.set_collection(st.driver_items.clone());
         let drv_idx = st
@@ -657,8 +664,12 @@ impl GuiApp {
 
     fn current_config(&self) -> Config {
         let st = self.state.borrow();
-        let hotkey = self
-            .cb_hotkey.selection()
+        let hotkey_a = self
+            .cb_hotkey_a.selection()
+            .and_then(|i| st.hotkey_items.get(i).cloned())
+            .unwrap_or_else(|| "无".to_string());
+        let hotkey_b = self
+            .cb_hotkey_b.selection()
             .and_then(|i| st.hotkey_items.get(i).cloned())
             .unwrap_or_else(|| "无".to_string());
         let driver = self
@@ -668,7 +679,9 @@ impl GuiApp {
         Config {
             mode: if st.mode_play { "play".to_string() } else { "cable".to_string() },
             cable_device: self.cb_cable.selection_string().unwrap_or_else(|| st.cable_device.clone()),
-            hotkey: if hotkey == "无" { None } else { Some(hotkey) },
+            hotkey_a: if hotkey_a == "无" { None } else { Some(hotkey_a.clone()) },
+            hotkey_b: if hotkey_b == "无" { None } else { Some(hotkey_b.clone()) },
+            hotkey: if hotkey_a == "无" { None } else { Some(hotkey_a) },
             driver,
             minimize_to_tray: st.minimize_to_tray,
             auto_start_service: st.auto_start_service,
@@ -713,9 +726,10 @@ impl GuiApp {
             st.running = true;
             st.stop = Some(stop.clone());
             st.log_lines.push(format!(
-                "已启动: 模式={} 热键={} 驱动={}",
+                "已启动: 模式={} 热键A={} 热键B={} 驱动={}",
                 cfg.mode,
-                cfg.hotkey.as_deref().unwrap_or("无"),
+                cfg.effective_hotkey_a().as_deref().unwrap_or("无"),
+                cfg.effective_hotkey_b().as_deref().unwrap_or("无"),
                 cfg.driver
             ));
         }

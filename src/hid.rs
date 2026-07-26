@@ -191,9 +191,27 @@ pub fn arm_mouse(api: &HidApi, audio_pid: Option<u16>) -> Option<HidDevice> {
 pub struct Connected {
     pub audio: HidDevice,
     pub cmd: HidDevice,
+    pub control: Option<HidDevice>,
     pub path: String,
     pub pid: u16,
     pub product_string: String,
+}
+
+/// 切换 AI 语音键映射模式。
+/// mode=true → 键A 激活, mode=false → 键B 激活。
+pub fn set_ai_key_mode(control: &HidDevice, mode: bool) -> bool {
+    let mut report = [0u8; 64];
+    report[0] = 0x0b;           // 控制端点 report ID
+    report[1] = 85;             // 0x55
+    report[2] = 26;             // 0x1A
+    report[3] = 24;             // 0x18
+    report[4] = if mode { 1 } else { 0 };  // AI key mode
+    // 剩余 payload (与 happyme531/aj200-mic 一致)
+    let payload: [u8; 24] = [1,0,0,2,0,0,4,0,0,8,0,0,16,0,0,32,0,0,64,0,0,128,0,0];
+    for (i, b) in payload.iter().enumerate() {
+        report[5 + i] = *b;
+    }
+    control.write(&report).unwrap_or(0) == 64
 }
 
 /// 打开鼠标音频接口 + 命令通道。返回连接元组; 全部失败返回 None。
@@ -221,9 +239,16 @@ pub fn connect_audio(
         };
         match open_by_path(api, &d.path) {
             Some(audio) => {
+                let control = api.device_list()
+                    .filter(|dd| dd.vendor_id() == 0x363C
+                        && dd.product_id() == d.product_id
+                        && dd.usage_page() == 0xffa0
+                        && dd.usage() == 0x0002)
+                    .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
                 return Some(Connected {
                     audio,
                     cmd,
+                    control,
                     path: d.path.clone(),
                     pid: d.product_id,
                     product_string: d.product_string.clone(),
