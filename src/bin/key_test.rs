@@ -1,86 +1,36 @@
 //! 语音键识别测试: 同时监听音频端点 + 命令端点, 看能否区分两个语音键。
 //!
 //! 运行: cargo run --bin KeyTest [PID]
-//!   默认 PID=0xED03 (AJAZZ AJ200 无线模式常用 PID)。
+//!   不指定 PID 则自动找所有 AJAZZ 设备。
 //!   按 Ctrl+C 退出。
 
 use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
-    let target_pid: Option<u16> = std::env::args()
+    let _target_pid: Option<u16> = std::env::args()
         .nth(1)
         .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok());
 
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HID init: {}", e))?;
 
-    // 搜索所有 usage_page=0xFFAA 设备, 可选按 PID 过滤
-    let devices: Vec<_> = api
-        .device_list()
-        .filter(|d| d.usage_page() == 0xFFAA && target_pid.map_or(true, |pid| d.product_id() == pid))
-        .collect();
-
-    if devices.is_empty() {
-        // 列出所有 usage_page=0xFFAA 设备帮助诊断
-        let all: Vec<_> = api.device_list().filter(|d| d.usage_page() == 0xFFAA).collect();
-        if all.is_empty() {
-            anyhow::bail!("未找到任何 usage_page=0xFFAA 设备。请确认鼠标已连接(无线接收器或数据线)。");
-        }
-        println!("找到 {} 个 usage_page=0xFFAA 设备, 但 PID 不匹配:", all.len());
-        for d in &all {
-            println!(
-                "  PID={:#06X}  usage={:#06X}  iface={}  {}",
-                d.product_id(), d.usage(), d.interface_number(),
-                d.product_string().unwrap_or("?")
-            );
-        }
-        println!("\n请用正确的 PID 重试: cargo run --bin KeyTest -- <PID>");
-        println!("例如: cargo run --bin KeyTest -- 0x{:04X}", all[0].product_id());
-        return Ok(());
-    }
-
-    println!("找到 {} 个匹配设备:", devices.len());
-    for d in &devices {
-        println!(
-            "  path={}  PID={:#06X}  usage={:#06X}  iface={}  {}",
-            d.path().to_string_lossy(),
-            d.product_id(),
-            d.usage(),
-            d.interface_number(),
-            d.product_string().unwrap_or("?")
-        );
-    }
-
-    // 尝试打开音频 + 命令端点
-    // 通常同一个物理设备有 2 个接口: usage=0x13 (audio) 和 usage=0x01 (cmd)
-    // 但不同 PID/固件可能不同, 遍历所有 interface_number 尝试。
-    let mut audio = None;
-    let mut cmd = None;
-
-    for d in &devices {
-        match d.interface_number() {
-            0 => audio = Some(d),
-            1 => cmd = Some(d),
-            _ => {}
-        }
-    }
-    // 兜底: 只找到 1 个时就当只有音频
-    if audio.is_none() && devices.len() == 1 {
-        audio = Some(&devices[0]);
-    }
-
-    let audio_dev = audio.and_then(|d| api.open_path(d.path()).ok());
-    let cmd_dev = cmd.and_then(|d| api.open_path(d.path()).ok());
-
-    let audio_path_str = audio.map(|d| d.path().to_string_lossy().to_string()).unwrap_or_default();
-    let cmd_path_str = cmd.map(|d| d.path().to_string_lossy().to_string()).unwrap_or_default();
-
-    let Some(audio_dev) = audio_dev else {
-        anyhow::bail!("无法打开音频端点");
+    // 用 bridge 的连接逻辑找到并打开音频+命令端点
+    let con = mousemic_rs::hid::connect_audio(
+        &api,
+        &Default::default(),
+        &Default::default(),
+        None,
+        &|s| eprintln!("  {}", s),
+    );
+    let Some(con) = con else {
+        anyhow::bail!("无法连接鼠标音频接口");
     };
 
+    let audio_dev = con.audio;
+    let cmd_dev = con.cmd;
+
     println!(
-        "已打开: audio={}, cmd={}",
-        audio_path_str, cmd_path_str
+        "已连接: path={}  PID={:#06X}  {}",
+        con.path, con.pid, con.product_string
     );
     println!("准备就绪。按住鼠标语音键, 注意区分两个键。Ctrl+C 退出。\n");
 
@@ -105,9 +55,7 @@ fn main() -> anyhow::Result<()> {
         let silence = now - last_audio;
 
         // 读命令端点 (0 超时 = 非阻塞轮询)
-        let cmd_n = cmd_dev
-            .as_ref()
-            .and_then(|c| c.read_timeout(&mut cmd_buf, 0).ok());
+        let cmd_n = cmd_dev.read_timeout(&mut cmd_buf, 0).ok();
 
         // 判断音频包是否有效 (report=0xB1, payload_len=57)
         let has_audio = audio_n == 64
