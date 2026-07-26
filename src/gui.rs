@@ -106,7 +106,7 @@ pub struct GuiApp {
     state: RefCell<AppState>,
 
     // ---- 顶层窗口 ----
-    #[nwg_control(size: (580, 780), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_control(size: (580, 750), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
     #[nwg_events( OnWindowClose: [GuiApp::on_close] )]
     window: nwg::Window,
 
@@ -137,7 +137,7 @@ pub struct GuiApp {
     btn_install_deps: nwg::Button,
 
     // ---- 设置 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 260), position: (20, 254), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 230), position: (20, 254), flags: "VISIBLE|BORDER")]
     settings_frame: nwg::Frame,
 
     #[nwg_control(parent: settings_frame, text: "输出模式:", position: (10, 24), size: (85, 22))]
@@ -166,45 +166,45 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, size: (120, 28), position: (350, 126))]
     cb_driver: nwg::ComboBox<String>,
 
+    // ---- 自动回车 ----
+    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 164), size: (85, 22))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
+    chk_auto_enter: nwg::CheckBox,
+    #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 162))]
+    cb_auto_enter_mode: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "延迟", position: (218, 164), size: (38, 22))]
+    lbl_auto_delay: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "0.5", position: (258, 164), size: (35, 24))]
+    txt_auto_delay: nwg::TextInput,
+    #[nwg_control(parent: settings_frame, text: "秒", position: (298, 164), size: (30, 22))]
+    lbl_auto_unit: nwg::Label,
+
     #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 194), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_autostart_change] )]
     chk_autostart: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 224), size: (155, 22))]
+    #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 194), size: (155, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
     chk_minimize: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "自动起桥接", position: (260, 224), size: (105, 22))]
+    #[nwg_control(parent: settings_frame, text: "自动起桥接", position: (260, 194), size: (105, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
     chk_autostart_svc: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "调试日志", position: (370, 224), size: (90, 22))]
+    #[nwg_control(parent: settings_frame, text: "调试日志", position: (370, 194), size: (90, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_debug_change] )]
     chk_debug: nwg::CheckBox,
 
-    // ---- 自动回车 ----
-    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 194), size: (85, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
-    chk_auto_enter: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 192))]
-    cb_auto_enter_mode: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "延迟", position: (218, 194), size: (38, 22))]
-    lbl_auto_delay: nwg::Label,
-    #[nwg_control(parent: settings_frame, text: "0.5", position: (258, 194), size: (35, 24))]
-    txt_auto_delay: nwg::TextInput,
-    #[nwg_control(parent: settings_frame, text: "秒", position: (298, 194), size: (30, 22))]
-    lbl_auto_unit: nwg::Label,
-
     // ---- 启停按钮 (直接在 window 上) ----
-    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 524), size: (130, 36))]
+    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 494), size: (130, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::start_bridge] )]
     btn_start: nwg::Button,
-    #[nwg_control(parent: window, text: "■ 停止", position: (160, 524), size: (130, 36))]  
+    #[nwg_control(parent: window, text: "■ 停止", position: (160, 494), size: (130, 36))]  
     #[nwg_events( OnButtonClick: [GuiApp::stop_bridge] )]
     btn_stop: nwg::Button,
-    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 524), size: (140, 36))]
+    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 494), size: (140, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::hide_to_tray] )]
     btn_hide: nwg::Button,
 
     // ---- 日志 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 190), position: (20, 574), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 190), position: (20, 544), flags: "VISIBLE|BORDER")]
     log_frame: nwg::Frame,
     #[nwg_control(parent: log_frame, position: (10, 24), size: (520, 150), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
     log_box: nwg::TextBox,
