@@ -46,6 +46,8 @@ pub struct Bridge {
     auto_enter_delay: f64,
     voice_ended_at: Option<Instant>,
     auto_enter_sent: bool,
+    typeless_fwd: bool,
+    typeless_bwd: bool,
 }
 
 impl Bridge {
@@ -83,6 +85,8 @@ impl Bridge {
             auto_enter_mode: config.auto_enter_mode.clone(),
             auto_enter_delay: config.auto_enter_delay,
             voice_ended_at: None, auto_enter_sent: false,
+            typeless_fwd: config.typeless_fwd,
+            typeless_bwd: config.typeless_bwd,
         })
     }
 
@@ -139,38 +143,50 @@ impl Bridge {
         hid::classify_label(hid::classify_link(&self.current_ps, &self.wired, &self.wireless, self.current_pid))
     }
 
+    /// 判断指定键是否启用 typeless 模式。
+    fn is_typeless(&self, key: u8) -> bool {
+        match key {
+            0x08 => self.typeless_fwd,
+            0x04 => self.typeless_bwd,
+            _ => false,
+        }
+    }
+
     /// 从 Consumer Control 接口读 0x0C 按键事件，设置 active_key。
     /// 同时处理按键释放 → 释放热键。
     fn poll_consumer(&mut self) {
-        let consumer = match &mut self.consumer {
-            Some(c) => c, None => return,
-        };
-        let mut buf = [0u8; 64];
-        loop {
-            match consumer.read_timeout(&mut buf, 1) {
-                Ok(n) if n > 0 && buf[0] == 0x0C => {
-                    let key = buf[1];
-                    let state = buf[2];
-                    if state == 0xEE && (key == 0x08 || key == 0x04) {
-                        self.active_key = Some(key);
-                    } else if state == 0x00 {
-                        self.active_key = None;
-                        if self.hotkey_engaged {
-                            // 释放当前热键
-                            match self.hotkey_engaged_key {
-                                Some(0x08) => { if let Some(ref mut hk) = self.hotkey_fwd { hk.release(); } }
-                                Some(0x04) => { if let Some(ref mut hk) = self.hotkey_bwd { hk.release(); } }
-                                _ => {}
-                            }
-                            self.hotkey_engaged = false;
-                            if self.auto_enter && self.voice_ended_at.is_none() {
-                                self.voice_ended_at = Some(Instant::now());
-                            }
+        // 先收集事件, 释放 consumer 借用后再处理 (避免 borrow conflict)
+        let mut events: Vec<(u8, u8)> = Vec::new();
+        if let Some(ref mut consumer) = self.consumer {
+            let mut buf = [0u8; 64];
+            loop {
+                match consumer.read_timeout(&mut buf, 1) {
+                    Ok(n) if n > 0 && buf[0] == 0x0C => {
+                        events.push((buf[1], buf[2]));
+                    }
+                    _ => { break; }
+                }
+            }
+        }
+        for (key, state) in events {
+            if state == 0xEE && (key == 0x08 || key == 0x04) {
+                self.active_key = Some(key);
+            } else if state == 0x00 {
+                self.active_key = None;
+                if self.hotkey_engaged {
+                    let engaged_key = self.hotkey_engaged_key.unwrap_or(0);
+                    if self.is_typeless(engaged_key) {
+                        // typeless: 不在此处释放, 等音频空闲超时后执行第二次短按
+                    } else {
+                        // 按住模式: 立即释放热键
+                        self.release_active_hotkey(engaged_key);
+                        self.hotkey_engaged = false;
+                        self.hotkey_engaged_key = None;
+                        if self.auto_enter && self.voice_ended_at.is_none() {
+                            self.voice_ended_at = Some(Instant::now());
                         }
                     }
                 }
-                Ok(_) => { break; }
-                Err(_) => { break; }
             }
         }
     }
@@ -179,6 +195,14 @@ impl Bridge {
         match engaged_key {
             0x08 => { if let Some(ref mut hk) = self.hotkey_fwd { hk.release(); } }
             0x04 => { if let Some(ref mut hk) = self.hotkey_bwd { hk.release(); } }
+            _ => {}
+        }
+    }
+
+    fn tap_hotkey_by_key(&mut self, key: u8) {
+        match key {
+            0x08 => { if let Some(ref mut hk) = self.hotkey_fwd { hk.tap(); } }
+            0x04 => { if let Some(ref mut hk) = self.hotkey_bwd { hk.tap(); } }
             _ => {}
         }
     }
@@ -283,22 +307,41 @@ impl Bridge {
                     self.auto_enter_sent = false;
                     self.voice_ended_at = None;
 
-                    // 语音来了, 按下对应热键
+                    // 语音来了, 触发对应热键
                     if !self.hotkey_engaged && self.active_key.is_some() {
                         let key = self.active_key.unwrap();
-                        let (hk, name): (Option<&mut HotKey>, Option<&str>) = match key {
-                            0x08 => (self.hotkey_fwd.as_mut(), self.hotkey_fwd_name.as_deref()),
-                            0x04 => (self.hotkey_bwd.as_mut(), self.hotkey_bwd_name.as_deref()),
-                            _ => (None, None),
+                        let has_hotkey = match key {
+                            0x08 => self.hotkey_fwd_name.is_some(),
+                            0x04 => self.hotkey_bwd_name.is_some(),
+                            _ => false,
                         };
-                        if let (Some(hk), Some(name)) = (hk, name) {
+                        if has_hotkey {
                             self.hotkey_engaged = true;
                             self.hotkey_engaged_key = Some(key);
-                            if debug {
-                                let key_label = if key == 0x08 { "前进" } else { "后退" };
-                                log(&format!("联动热键已激活: 按住 {} ({}键)", name, key_label));
+                            if self.is_typeless(key) {
+                                // typeless: 短按热键 (开始录音信号)
+                                if debug {
+                                    let key_label = if key == 0x08 { "前进" } else { "后退" };
+                                    log(&format!("typeless: 短按热键开始 ({}键)", key_label));
+                                }
+                                self.tap_hotkey_by_key(key);
+                            } else {
+                                // 按住模式
+                                let name = match key {
+                                    0x08 => self.hotkey_fwd_name.as_deref().unwrap_or(""),
+                                    0x04 => self.hotkey_bwd_name.as_deref().unwrap_or(""),
+                                    _ => "",
+                                };
+                                if debug {
+                                    let key_label = if key == 0x08 { "前进" } else { "后退" };
+                                    log(&format!("联动热键已激活: 按住 {} ({}键)", name, key_label));
+                                }
+                                match key {
+                                    0x08 => { if let Some(ref mut hk) = self.hotkey_fwd { hk.press(); } }
+                                    0x04 => { if let Some(ref mut hk) = self.hotkey_bwd { hk.press(); } }
+                                    _ => {}
+                                }
                             }
-                            hk.press();
                         }
                     }
                 }
@@ -337,7 +380,13 @@ impl Bridge {
             // ---- 热键松开 (音频停止后) ----
             if self.hotkey_engaged && self.start.elapsed().as_secs_f64() - self.last_audio > crate::HOTKEY_IDLE_TIMEOUT {
                 if let Some(key) = self.hotkey_engaged_key {
-                    self.release_active_hotkey(key);
+                    if self.is_typeless(key) {
+                        // typeless: 音频结束后短按热键 (结束录音信号)
+                        if debug { log("typeless: 短按热键结束"); }
+                        self.tap_hotkey_by_key(key);
+                    } else {
+                        self.release_active_hotkey(key);
+                    }
                 }
                 self.hotkey_engaged = false;
                 self.hotkey_engaged_key = None;

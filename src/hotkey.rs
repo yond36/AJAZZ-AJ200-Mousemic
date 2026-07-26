@@ -13,17 +13,19 @@ use std::path::PathBuf;
 
 /// 可选热键名列表 (供 GUI 下拉 / CLI 校验)。
 pub const HOTKEY_NAMES: &[&str] = &[
-    "left_alt", "right_alt", "right_ctrl", "right_shift",
+    "L_alt", "R_alt", "R_ctrl", "R_shift",
     "f9", "f10", "space", "grave", "capslock",
+    "R_alt+space", "R_alt+R_shift", "R_alt+R_ctrl",
 ];
 
-/// 名称 -> (Set-1 扫描码, 是否扩展键)。与 Python HOTKEYS 表一一对应。
-pub fn hotkey_scan(name: &str) -> Option<(u8, bool)> {
+/// 单键名 -> (Set-1 扫描码, 是否扩展键)。与 Python HOTKEYS 表一一对应。
+/// 同时兼容旧名 (left_alt/right_alt 等) 和新缩写 (L_alt/R_alt 等)。
+fn single_scan(name: &str) -> Option<(u8, bool)> {
     let v = match name {
-        "left_alt" => (0x38, false),
-        "right_alt" => (0x38, true),
-        "right_ctrl" => (0x1D, true),
-        "right_shift" => (0x36, false),
+        "L_alt" | "left_alt" => (0x38, false),
+        "R_alt" | "right_alt" => (0x38, true),
+        "R_ctrl" | "right_ctrl" => (0x1D, true),
+        "R_shift" | "right_shift" => (0x36, false),
         "f9" => (0x43, false),
         "f10" => (0x44, false),
         "space" => (0x39, false),
@@ -34,6 +36,21 @@ pub fn hotkey_scan(name: &str) -> Option<(u8, bool)> {
     Some(v)
 }
 
+/// 名称 -> 扫描码列表 (支持 "+" 分隔的组合键)。
+pub fn hotkey_scans(name: &str) -> Option<Vec<(u8, bool)>> {
+    let parts: Vec<&str> = name.split('+').collect();
+    let mut result = Vec::with_capacity(parts.len());
+    for p in &parts {
+        result.push(single_scan(p.trim())?);
+    }
+    if result.is_empty() { None } else { Some(result) }
+}
+
+/// 兼容旧接口: 单键查询。
+pub fn hotkey_scan(name: &str) -> Option<(u8, bool)> {
+    single_scan(name)
+}
+
 enum Backend {
     SendInput,
     #[allow(dead_code)]
@@ -41,9 +58,9 @@ enum Backend {
 }
 
 /// 联动热键管理器: 跟踪"按下"状态, 避免重复发送; 离开作用域时自动抬起 (防卡键)。
+/// 支持组合键 (多个扫描码同时按下/释放)。
 pub struct HotKey {
-    sc: u8,
-    ext: bool,
+    scans: Vec<(u8, bool)>,
     down: bool,
     #[allow(dead_code)]
     backend: Backend,
@@ -51,14 +68,15 @@ pub struct HotKey {
 
 impl HotKey {
     /// 按名称与驱动创建。driver: "sendinput" | "interception"。
+    /// 支持组合键名如 "right_alt+space"。
     pub fn new(name: &str, driver: &str) -> anyhow::Result<Self> {
-        let (sc, ext) = hotkey_scan(name)
+        let scans = hotkey_scans(name)
             .ok_or_else(|| anyhow::anyhow!("未知热键名: {} (可选: {:?})", name, HOTKEY_NAMES))?;
         let backend = match driver {
             "interception" => Backend::Interception(InterceptionCtx::new()?),
             _ => Backend::SendInput,
         };
-        Ok(HotKey { sc, ext, down: false, backend })
+        Ok(HotKey { scans, down: false, backend })
     }
 
     /// 按住 (若已按住则忽略)。
@@ -81,15 +99,36 @@ impl HotKey {
         self.down
     }
 
+    /// 短按 (按下后立即松开)。
+    pub fn tap(&mut self) {
+        self.inject(false);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        self.inject(true);
+        self.down = false;
+    }
+
     /// 退出前确保抬起, 防止热键卡在按下状态。
     pub fn close(&mut self) {
         self.release();
     }
 
     fn inject(&self, keyup: bool) {
-        match &self.backend {
-            Backend::SendInput => send_scan(self.sc, self.ext, keyup),
-            Backend::Interception(ctx) => ctx.inject(self.sc, self.ext, keyup),
+        if keyup {
+            // 释放: 反序 (先释放主键, 再释放修饰键)
+            for &(sc, ext) in self.scans.iter().rev() {
+                match &self.backend {
+                    Backend::SendInput => send_scan(sc, ext, true),
+                    Backend::Interception(ctx) => ctx.inject(sc, ext, true),
+                }
+            }
+        } else {
+            // 按下: 正序 (先按修饰键, 再按主键)
+            for &(sc, ext) in &self.scans {
+                match &self.backend {
+                    Backend::SendInput => send_scan(sc, ext, false),
+                    Backend::Interception(ctx) => ctx.inject(sc, ext, false),
+                }
+            }
         }
     }
 }

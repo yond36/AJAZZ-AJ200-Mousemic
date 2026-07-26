@@ -43,6 +43,12 @@ pub struct Config {
     /// 语音结束后的延迟 (秒)。
     #[serde(default)]
     pub auto_enter_delay: f64,
+    /// Typeless 模式 (前进键): 按住语音键=短按热键, 松开语音键=音频结束后再短按热键。
+    #[serde(default)]
+    pub typeless_fwd: bool,
+    /// Typeless 模式 (后退键)。
+    #[serde(default)]
+    pub typeless_bwd: bool,
 }
 
 impl Default for Config {
@@ -50,7 +56,7 @@ impl Default for Config {
         Config {
             mode: default_mode(),
             cable_device: default_cable(),
-            hotkey_forward: Some("right_alt".to_string()),
+            hotkey_forward: Some("R_alt".to_string()),
             hotkey_backward: None,
             driver: default_driver(),
             minimize_to_tray: false,
@@ -61,6 +67,8 @@ impl Default for Config {
             auto_enter: false,
             auto_enter_mode: default_auto_enter_mode(),
             auto_enter_delay: 0.5,
+            typeless_fwd: false,
+            typeless_bwd: false,
         }
     }
 }

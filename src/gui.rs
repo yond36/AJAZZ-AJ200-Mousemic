@@ -70,6 +70,10 @@ struct AppState {
     auto_enter_mode: String,
     auto_enter_delay: f64,
 
+    // typeless 模式 (前进/后退独立)
+    typeless_fwd: bool,
+    typeless_bwd: bool,
+
     // 启动后首次收进托盘
     pending_hide: bool,
 }
@@ -97,6 +101,8 @@ impl Default for AppState {
             auto_enter: false,
             auto_enter_mode: "enter".to_string(),
             auto_enter_delay: 0.5,
+            typeless_fwd: false,
+            typeless_bwd: false,
             pending_hide: false,
         }
     }
@@ -108,7 +114,7 @@ pub struct GuiApp {
     state: RefCell<AppState>,
 
     // ---- 顶层窗口 ----
-    #[nwg_control(size: (580, 750), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_control(size: (580, 782), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
     #[nwg_events( OnWindowClose: [GuiApp::on_close] )]
     window: nwg::Window,
 
@@ -139,7 +145,7 @@ pub struct GuiApp {
     btn_install_deps: nwg::Button,
 
     // ---- 设置 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 230), position: (20, 254), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 260), position: (20, 254), flags: "VISIBLE|BORDER")]
     settings_frame: nwg::Frame,
 
     #[nwg_control(parent: settings_frame, text: "输出模式:", position: (10, 24), size: (85, 22))]
@@ -158,60 +164,68 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, size: (300, 28), position: (80, 94))]
     cb_cable: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "前进键:", position: (10, 128), size: (65, 22))]
+    #[nwg_control(parent: settings_frame, text: "前进键:", position: (10, 130), size: (60, 22))]
     lbl_hotkey_fwd: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (90, 28), position: (75, 126))]
+    #[nwg_control(parent: settings_frame, size: (115, 28), position: (70, 128))]
     cb_hotkey_fwd: nwg::ComboBox<String>,
-
-    #[nwg_control(parent: settings_frame, text: "后退键:", position: (175, 128), size: (65, 22))]
+    #[nwg_control(parent: settings_frame, text: "后退键:", position: (195, 130), size: (60, 22))]
     lbl_hotkey_bwd: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (90, 28), position: (240, 126))]
+    #[nwg_control(parent: settings_frame, size: (115, 28), position: (255, 128))]
     cb_hotkey_bwd: nwg::ComboBox<String>,
-
-    #[nwg_control(parent: settings_frame, text: "注入方式:", position: (345, 128), size: (75, 22))]
+    #[nwg_control(parent: settings_frame, text: "注入:", position: (380, 130), size: (42, 22))]
     lbl_driver: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (100, 28), position: (420, 126))]
+    #[nwg_control(parent: settings_frame, size: (105, 28), position: (422, 128))]
     cb_driver: nwg::ComboBox<String>,
 
+    // ---- Typeless 模式 ----
+    #[nwg_control(parent: settings_frame, text: "Typeless模式", position: (10, 164), size: (95, 22))]
+    lbl_typeless: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "前进", position: (110, 164), size: (55, 22))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
+    chk_typeless_fwd: nwg::CheckBox,
+    #[nwg_control(parent: settings_frame, text: "后退", position: (170, 164), size: (55, 22))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
+    chk_typeless_bwd: nwg::CheckBox,
+
     // ---- 自动回车 ----
-    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 164), size: (85, 22))]
+    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 196), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
     chk_auto_enter: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 162))]
+    #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 194))]
     cb_auto_enter_mode: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "延迟", position: (218, 164), size: (38, 22))]
+    #[nwg_control(parent: settings_frame, text: "延迟", position: (220, 196), size: (38, 22))]
     lbl_auto_delay: nwg::Label,
-    #[nwg_control(parent: settings_frame, text: "0.5", position: (258, 164), size: (35, 24))]
+    #[nwg_control(parent: settings_frame, text: "0.5", position: (260, 196), size: (38, 24))]
     txt_auto_delay: nwg::TextInput,
-    #[nwg_control(parent: settings_frame, text: "秒", position: (298, 164), size: (30, 22))]
+    #[nwg_control(parent: settings_frame, text: "秒", position: (302, 196), size: (25, 22))]
     lbl_auto_unit: nwg::Label,
 
-    #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 194), size: (85, 22))]
+    #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 228), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_autostart_change] )]
     chk_autostart: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 194), size: (155, 22))]
+    #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 228), size: (155, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
     chk_minimize: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "自动起桥接", position: (260, 194), size: (105, 22))]
+    #[nwg_control(parent: settings_frame, text: "自动起桥接", position: (260, 228), size: (105, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
     chk_autostart_svc: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "调试日志", position: (370, 194), size: (90, 22))]
+    #[nwg_control(parent: settings_frame, text: "调试日志", position: (370, 228), size: (90, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_debug_change] )]
     chk_debug: nwg::CheckBox,
 
     // ---- 启停按钮 (直接在 window 上) ----
-    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 494), size: (130, 36))]
+    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 524), size: (130, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::start_bridge] )]
     btn_start: nwg::Button,
-    #[nwg_control(parent: window, text: "■ 停止", position: (160, 494), size: (130, 36))]  
+    #[nwg_control(parent: window, text: "■ 停止", position: (160, 524), size: (130, 36))]  
     #[nwg_events( OnButtonClick: [GuiApp::stop_bridge] )]
     btn_stop: nwg::Button,
-    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 494), size: (140, 36))]
+    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 524), size: (140, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::hide_to_tray] )]
     btn_hide: nwg::Button,
 
     // ---- 日志 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 190), position: (20, 544), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 190), position: (20, 574), flags: "VISIBLE|BORDER")]
     log_frame: nwg::Frame,
     #[nwg_control(parent: log_frame, position: (10, 24), size: (520, 150), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
     log_box: nwg::TextBox,
@@ -259,6 +273,8 @@ impl GuiApp {
         state.auto_enter = cfg.auto_enter;
         state.auto_enter_mode = cfg.auto_enter_mode.clone();
         state.auto_enter_delay = cfg.auto_enter_delay;
+        state.typeless_fwd = cfg.typeless_fwd;
+        state.typeless_bwd = cfg.typeless_bwd;
 
         // 热键下拉框数据 (无 + HOTKEY_NAMES)
         let mut hk = vec!["无".to_string()];
@@ -340,6 +356,8 @@ impl GuiApp {
         let ae_idx = if st.auto_enter_mode == "ctrl_enter" { 1 } else { 0 };
         self.cb_auto_enter_mode.set_selection(Some(ae_idx));
         self.txt_auto_delay.set_text(&format!("{}", st.auto_enter_delay));
+        self.chk_typeless_fwd.set_check_state(if st.typeless_fwd { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
+        self.chk_typeless_bwd.set_check_state(if st.typeless_bwd { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
 
         // CBS_DROPDOWNLIST 自带下拉箭头, 不再手动 dropdown(true) 避免启动时弹出列表
 
@@ -446,6 +464,8 @@ impl GuiApp {
         if let Ok(d) = self.txt_auto_delay.text().parse::<f64>() {
             st.auto_enter_delay = d.clamp(0.0, 10.0);
         }
+        st.typeless_fwd = self.chk_typeless_fwd.check_state() == nwg::CheckBoxState::Checked;
+        st.typeless_bwd = self.chk_typeless_bwd.check_state() == nwg::CheckBoxState::Checked;
         drop(st);
         self.persist_config();
     }
@@ -691,6 +711,8 @@ impl GuiApp {
             auto_enter: st.auto_enter,
             auto_enter_mode: st.auto_enter_mode.clone(),
             auto_enter_delay: st.auto_enter_delay,
+            typeless_fwd: st.typeless_fwd,
+            typeless_bwd: st.typeless_bwd,
         }
     }
 
