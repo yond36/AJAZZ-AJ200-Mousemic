@@ -205,7 +205,8 @@ pub fn ai_on(control: &HidDevice) -> bool {
     report[2] = 0x1a;
     report[3] = 0x10;  // 0x10 = AI ON
     report[5] = 0x01;
-    let payload: [u8; 21] = [0x02,0,0,0x04,0,0,0x08,0x01,0,0x10,0,0,0x20,0,0,0x40,0,0,0x80,0,0];
+    // 官方 payload (report[6..28]): 00 00 02 00 00 04 00 00 08 01 00 10 00 00 20 00 00 40 00 00 80 00
+    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,0x01,0, 0x10,0,0, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
     // 发送两次, 间隔 50ms
     if control.write(&report).unwrap_or(0) != 64 { return false; }
@@ -222,7 +223,7 @@ pub fn ai_off(control: &HidDevice) -> bool {
     report[2] = 0x1a;
     report[3] = 0x08;  // 0x08 = AI OFF
     report[5] = 0x01;
-    let payload: [u8; 21] = [0x02,0,0,0x04,0,0,0x08,0x01,0,0x10,0,0,0x20,0,0,0x40,0,0,0x80,0,0];
+    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,0x01,0, 0x10,0,0, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
     if control.write(&report).unwrap_or(0) != 64 { return false; }
     std::thread::sleep(std::time::Duration::from_millis(50));
