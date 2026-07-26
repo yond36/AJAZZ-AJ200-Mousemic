@@ -1,12 +1,9 @@
-//! AI 键测试 v8: 0x55命令 + 0x18持久化写入。
-//! 
-//! AI禁用不生效的原因可能是 0x55 只改寄存器，不持久化。
-//! 加上 0x18 config write 来尝试让关闭生效。
+//! AI 键测试 v9: 同时读 CMD端口(可能有0x0C按键事件) + 鼠标接口 + 音频
 
 use std::io::{self, Write};
 use std::time::Instant;
 
-fn cmd55(ctrl: &hidapi::HidDevice, fwd: bool, bwd: bool) {
+fn ai_cmd(ctrl: &hidapi::HidDevice, fwd: bool, bwd: bool) {
     let byte2 = (if fwd { 0x10u8 } else { 0x00 }) | (if bwd { 0x08u8 } else { 0x00 });
     let byte3 = if fwd || bwd { 0x01 } else { 0x00 };
     let (b14, b15) = if bwd { (0x00, 0x00) } else { (0x01, 0x02) };
@@ -28,34 +25,43 @@ fn cmd55(ctrl: &hidapi::HidDevice, fwd: bool, bwd: bool) {
     std::thread::sleep(std::time::Duration::from_millis(300));
 }
 
-/// 发送 0x18 写入配置命令持久化
-fn watch(mouse: &hidapi::HidDevice, audio: &hidapi::HidDevice) {
+fn watch(cmd: &hidapi::HidDevice, mouse: Option<&hidapi::HidDevice>, audio: &hidapi::HidDevice) {
     let mut buf = [0u8; 64];
-    let deadline = Instant::now() + std::time::Duration::from_secs(12);
+    let deadline = Instant::now() + std::time::Duration::from_secs(15);
     let mut audio_count = 0u32;
-    let mut key_state: Option<u8> = None;
 
-    println!("  (12秒窗口, 请按键...)");
+    println!("  (15秒窗口, 请按键...)");
     while Instant::now() < deadline {
-        if let Ok(n) = mouse.read_timeout(&mut buf, 5) {
+        // 1. CMD端口 — 0x0C 按键事件可能走这里
+        if let Ok(n) = cmd.read_timeout(&mut buf, 5) {
             if n > 0 {
                 if buf[0] == 0x0C {
                     let key = buf[1];
-                    if key == 0x08 && key_state != Some(0x08) {
-                        key_state = Some(0x08);
-                        println!("  ▼ 前进键按下");
-                    } else if key == 0x04 && key_state != Some(0x04) {
-                        key_state = Some(0x04);
-                        println!("  ▼ 后退键按下");
-                    } else if key == 0x00 && key_state.is_some() {
-                        let name = if key_state == Some(0x08) { "前进键" } else { "后退键" };
-                        println!("  ▲ {}释放", name);
-                        key_state = None;
-                    }
+                    if key == 0x08 { println!("  ▼ 前进键按下"); }
+                    else if key == 0x04 { println!("  ▼ 后退键按下"); }
+                    else if key == 0x00 { println!("  ▲ 释放"); }
+                    else { println!("  [0x0C {:02X} {:02X}]", key, buf[2]); }
+                } else if !(buf[0] == 0 && buf[1] == 0) {
+                    print!("  [CMD {:02X}", buf[0]);
+                    for i in 1..n.min(6) { print!(" {:02X}", buf[i]); }
+                    println!("]");
                 }
             }
         }
-        if let Ok(64) = audio.read_timeout(&mut buf, 5) {
+
+        // 2. 鼠标输入接口
+        if let Some(m) = mouse {
+            if let Ok(n) = m.read_timeout(&mut buf, 2) {
+                if n > 0 && buf[0] != 0 {
+                    print!("  [MOUSE {:02X}", buf[0]);
+                    for i in 1..n.min(6) { print!(" {:02X}", buf[i]); }
+                    println!("]");
+                }
+            }
+        }
+
+        // 3. 音频
+        if let Ok(64) = audio.read_timeout(&mut buf, 2) {
             if buf[0] == 0xB1 && buf[2] == 57 {
                 audio_count += 1;
                 if audio_count == 1 { print!("  ♫ "); }
@@ -78,14 +84,15 @@ fn main() -> anyhow::Result<()> {
         .find_map(|d| api.open_path(d.path()).ok());
     let Some(ref ctrl) = control else { anyhow::bail!("无控制端点"); };
 
+    // 尝试打开鼠标输入接口
     let mouse = api.device_list()
         .filter(|d| d.vendor_id() == 0x363C && d.product_id() == con.pid
             && d.usage_page() == 0x0001 && d.usage() == 0x0002)
         .find_map(|d| api.open_path(d.path()).ok());
-    let has_mouse = mouse.is_some();
-    println!( "鼠标输入接口: {}", if has_mouse { "✓" } else { "✗" } );
 
-    println!("\n1=AI开启  2=AI关闭  3=仅前进  4=仅后退  q=退出\n");
+    println!("CMD端口: ✓  音频: ✓  鼠标输入: {}\n", if mouse.is_some() { "✓" } else { "✗" });
+    println!("1=AI开启  2=AI关闭  3=仅前进  4=仅后退  q=退出");
+    println!("观察 [CMD ...] 输出 — 0x0C=按键事件\n");
 
     loop {
         print!("> ");
@@ -93,11 +100,11 @@ fn main() -> anyhow::Result<()> {
         let mut s = String::new();
         io::stdin().read_line(&mut s)?;
         match s.trim() {
-            "1" => { cmd55(ctrl, true, true);  println!("AI开启(两键)"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
-            "2" => { cmd55(ctrl, false, false); println!("AI关闭(两键)"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
-            "3" => { cmd55(ctrl, true, false);  println!("仅前进AI"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
-            "4" => { cmd55(ctrl, false, true);  println!("仅后退AI"); if has_mouse { watch(mouse.as_ref().unwrap(), &con.audio); } }
-            "q" => { cmd55(ctrl, true, true); println!("已恢复, 退出"); break; }
+            "1" => { ai_cmd(ctrl, true, true);   println!("AI开启(两键)"); watch(&con.cmd, mouse.as_ref(), &con.audio); }
+            "2" => { ai_cmd(ctrl, false, false); println!("AI关闭(两键)"); watch(&con.cmd, mouse.as_ref(), &con.audio); }
+            "3" => { ai_cmd(ctrl, true, false);  println!("仅前进AI"); watch(&con.cmd, mouse.as_ref(), &con.audio); }
+            "4" => { ai_cmd(ctrl, false, true);  println!("仅后退AI"); watch(&con.cmd, mouse.as_ref(), &con.audio); }
+            "q" => { ai_cmd(ctrl, true, true); println!("已恢复, 退出"); break; }
             _ => println!("?"),
         }
     }
