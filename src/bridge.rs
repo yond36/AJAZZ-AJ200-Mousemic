@@ -89,6 +89,9 @@ impl Bridge {
     fn disconnect(&mut self) {
         if let Some(hk) = &mut self.hotkey { hk.release(); }
         self.hotkey_engaged = false;
+        if let Some(ref ctrl) = self.control {
+            hid::ai_off(ctrl);
+        }
         self.decoder = None;
         if let Some(d) = self.audio.take() { drop(d); }
         if let Some(c) = self.cmd.take() { drop(c); }

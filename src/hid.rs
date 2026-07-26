@@ -197,39 +197,34 @@ pub struct Connected {
     pub product_string: String,
 }
 
-/// 开启 AI 语音功能 (使用官方驱动命令格式)。
+/// 开启 AI 语音功能 (两键都启用)。
 pub fn ai_on(control: &HidDevice) -> bool {
-    let mut report = [0u8; 64];
+    let mut report = [0u8; 32];
     report[0] = 0x0b;
     report[1] = 0x55;
     report[2] = 0x1a;
-    report[3] = 0x10;  // 0x10 = AI ON
+    report[3] = 0x18;  // mask = 两键
+    report[4] = 0x01;  // AI 启用
     report[5] = 0x01;
-    // 官方 payload (report[6..28]): 00 00 02 00 00 04 00 00 08 01 00 10 00 00 20 00 00 40 00 00 80 00
-    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,0x01,0, 0x10,0,0, 0x20,0,0, 0x40,0,0, 0x80,0];
+    // bwShort=0(AI), bwLong=0(AI), fwShort=0(AI), fwLong=0(AI)
+    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,0,0, 0x10,0,0, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
-    // 发送两次, 间隔 50ms
-    if control.write(&report).unwrap_or(0) != 64 { return false; }
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    report[4] = 0x01;  // 第二次 byte[4]=1
-    control.write(&report).unwrap_or(0) == 64
+    control.write(&report).unwrap_or(0) == 32
 }
 
-/// 关闭 AI 语音功能 (使用官方驱动命令格式, 0x10 表示键1, byte[4]=0 表示关闭)。
+/// 关闭 AI 语音功能 (两键恢复默认前进/后退行为)。
 pub fn ai_off(control: &HidDevice) -> bool {
-    let mut report = [0u8; 64];
+    let mut report = [0u8; 32];
     report[0] = 0x0b;
     report[1] = 0x55;
     report[2] = 0x1a;
-    report[3] = 0x10;  // 0x10 = 键1
-    report[4] = 0x00;  // 0x00 = 关闭 AI
+    report[3] = 0x18;  // mask = 两键
+    report[4] = 0x00;  // AI 禁用
     report[5] = 0x01;
-    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,0x01,0, 0x10,0,0, 0x20,0,0, 0x40,0,0, 0x80,0];
+    // bwShort=1(默认), bwLong=1(默认), fwShort=2(默认), fwLong=2(默认)
+    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,1,1, 0x10,2,2, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
-    if control.write(&report).unwrap_or(0) != 64 { return false; }
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    report[4] = 0x01;
-    control.write(&report).unwrap_or(0) == 64
+    control.write(&report).unwrap_or(0) == 32
 }
 
 /// 旧接口兼容
