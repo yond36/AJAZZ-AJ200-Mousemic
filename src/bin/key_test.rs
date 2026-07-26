@@ -1,59 +1,96 @@
-//! 按键区分测试: 只检测 CMD/MOUSE 端口的 0x0C 按键事件。
+//! 按键区分测试: 打开所有 AJAZZ 接口，异步方式读 0x0C 事件。
+//! 关键: JS 用 dev.on('data') 异步模式，这里用独立线程 + blocking read。
 
 use std::io::{self, Write};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HID: {}", e))?;
-    let con = mousemic_rs::hid::connect_audio(&api, &Default::default(), &Default::default(), None, &|s| eprintln!("  {}", s));
-    let Some(con) = con else { anyhow::bail!("无法连接"); };
 
-    // 鼠标输入接口
-    let mouse = api.device_list()
-        .filter(|d| d.vendor_id() == 0x363C && d.product_id() == con.pid
-            && d.usage_page() == 0x0001 && d.usage() == 0x0002)
-        .find_map(|d| api.open_path(d.path()).ok());
+    // 找到所有 AJAZZ 接口
+    let paths: Vec<_> = api.device_list()
+        .filter(|d| d.vendor_id() == 0x363C)
+        .map(|d| (d.path().to_string_lossy().into_owned(),
+                  d.usage_page(), d.usage(),
+                  d.product_id()))
+        .collect();
 
-    println!("CMD端口: ✓  鼠标接口: {}\n", if mouse.is_some() { "✓" } else { "✗" });
-    println!("按前进和后退键, 看是否有 0x0C 事件。Ctrl+C 退出。\n");
-
-    let mut buf = [0u8; 64];
-    loop {
-        // CMD端口
-        if let Ok(n) = con.cmd.read_timeout(&mut buf, 10) {
-            if n > 0 {
-                print!("CMD: ");
-                for i in 0..n.min(8) { print!("{:02X} ", buf[i]); }
-                if buf[0] == 0x0C {
-                    match buf[1] {
-                        0x08 => println!("← 前进键按下"),
-                        0x04 => println!("← 后退键按下"),
-                        0x00 => println!("← 释放"),
-                        _ => println!(),
-                    }
-                } else {
-                    println!();
-                }
-            }
-        }
-        // 鼠标接口
-        if let Some(ref m) = mouse {
-            if let Ok(n) = m.read_timeout(&mut buf, 5) {
-                if n > 0 {
-                    print!("MOUSE: ");
-                    for i in 0..n.min(8) { print!("{:02X} ", buf[i]); }
-                    if buf[0] == 0x0C {
-                        match buf[1] {
-                            0x08 => println!("← 前进键按下"),
-                            0x04 => println!("← 后退键按下"),
-                            0x00 => println!("← 释放"),
-                            _ => println!(),
-                        }
-                    } else {
-                        println!();
-                    }
-                }
-            }
-        }
+    println!("找到 {} 个 AJAZZ 接口:", paths.len());
+    for (p, up, u, pid) in &paths {
+        println!("  up=0x{:04X} u=0x{:04X} pid=0x{:04X} {}", up, u, pid, p.split('#').nth(1).unwrap_or("?"));
     }
+    println!();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    // Ctrl+C 处理
+    let r2 = running.clone();
+    thread::spawn(move || {
+        let mut s = String::new();
+        let _ = io::stdin().read_line(&mut s);
+        r2.store(false, Ordering::SeqCst);
+    });
+
+    // 对每个接口创建读线程
+    let mut handles = Vec::new();
+
+    for (path, up, u, pid) in &paths {
+        // 跳过音频接口 (只产音频)
+        if *up == 0xFFAA { continue; }
+
+        let path = path.clone();
+        let up = *up;
+        let u = *u;
+        let pid = *pid;
+        let running = running.clone();
+
+        let handle = thread::spawn(move || {
+            match hidapi::HidApi::new() {
+                Ok(a) => {
+                    match a.open_path(&std::ffi::CString::new(path.as_bytes()).unwrap()) {
+                        Ok(dev) => {
+                            let mut buf = [0u8; 64];
+                            while running.load(Ordering::SeqCst) {
+                                match dev.read_timeout(&mut buf, 100) {
+                                    Ok(n) if n > 0 => {
+                                        if buf[0] != 0 {
+                                            let label = format!("up=0x{:04X} u=0x{:04X} pid=0x{:04X}", up, u, pid);
+                                            if buf[0] == 0x0C {
+                                                match buf[1] {
+                                                    0x08 => println!("[{}] ▼ 前进键按下", label),
+                                                    0x04 => println!("[{}] ▼ 后退键按下", label),
+                                                    0x00 => println!("[{}] ▲ 释放", label),
+                                                    _ => println!("[{}] 0x0C {:02X} {:02X}", label, buf[1], buf[2]),
+                                                }
+                                            } else {
+                                                print!("[{}] ", label);
+                                                for i in 0..n.min(8) { print!("{:02X} ", buf[i]); }
+                                                println!();
+                                            }
+                                        }
+                                    }
+                                    Err(_) => break,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Err(e) => println!("无法打开 up=0x{:04X} u=0x{:04X}: {}", up, u, e),
+                    }
+                }
+                Err(_) => {}
+            }
+        });
+        handles.push((up, u, pid, handle));
+    }
+
+    println!("已开启 {} 个读线程。按两个AI键，看哪个接口有 0x0C 事件。回车退出。\n", handles.len());
+
+    for (_, _, _, h) in handles {
+        let _ = h.join();
+    }
+    Ok(())
 }

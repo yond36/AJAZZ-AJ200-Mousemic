@@ -74,19 +74,27 @@ function disableAll() {
   }
 }
 
-function enableForwardOnly() {
-  console.log('\n=== ENABLING forward key AI only ===');
-  if (sendCommand(0x10, 1, 0, 0, 1, 1)) {  // mask=16, backward=default
-    console.log('SUCCESS! Only forward key AI enabled.');
+async function enableForwardOnly() {
+  console.log('\n=== Step 1/2: Disable all AI keys ===');
+  if (!sendCommand(0x18, 0, 2, 2, 1, 1)) return;
+  await sleep(200);
+  console.log('=== Step 2/2: Enable forward only (mask=0x10) ===');
+  if (sendCommand(0x10, 1, 0, 0, 1, 1)) {
+    console.log('SUCCESS! Forward=AI, Backward=normal mouse key.');
   }
 }
 
-function enableBackwardOnly() {
-  console.log('\n=== ENABLING backward key AI only ===');
-  if (sendCommand(0x08, 1, 2, 2, 0, 0)) {  // mask=8, forward=default
-    console.log('SUCCESS! Only backward key AI enabled.');
+async function enableBackwardOnly() {
+  console.log('\n=== Step 1/2: Disable all AI keys ===');
+  if (!sendCommand(0x18, 0, 2, 2, 1, 1)) return;
+  await sleep(200);
+  console.log('=== Step 2/2: Enable backward only (mask=0x08) ===');
+  if (sendCommand(0x08, 1, 2, 2, 0, 0)) {
+    console.log('SUCCESS! Backward=AI, Forward=normal mouse key.');
   }
 }
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function showStatus() {
   console.log('\n=== CONNECTED AJAZZ DEVICES ===');
@@ -112,6 +120,7 @@ function showStatus() {
 
 // ─── MAIN ───
 
+(async () => {
 const cmd = (process.argv[2] || 'enable').toLowerCase();
 switch(cmd) {
   case 'enable':
@@ -124,11 +133,11 @@ switch(cmd) {
     break;
   case 'forward':
   case 'fw':
-    enableForwardOnly();
+    await enableForwardOnly();
     break;
   case 'backward':
   case 'bw':
-    enableBackwardOnly();
+    await enableBackwardOnly();
     break;
   case 'status':
   case 'list':
@@ -138,7 +147,8 @@ switch(cmd) {
     console.log('Usage: node ai_key_control.js [enable|disable|forward|backward|status]');
     console.log('  enable   - Enable AI on both forward and backward keys');
     console.log('  disable  - Disable AI, restore normal forward/backward');
-    console.log('  forward  - Enable AI only on forward key');
-    console.log('  backward - Enable AI only on backward key');
+    console.log('  forward  - Enable AI only on forward key (disables backward)');
+    console.log('  backward - Enable AI only on backward key (disables forward)');
     console.log('  status   - Show connected AJAZZ devices');
 }
+})();
