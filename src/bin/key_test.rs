@@ -1,11 +1,9 @@
-//! AI 键区分测试 v4: 验证独立按键配置是否生效。
+//! AI 键区分测试 v5: 逐键逐模式测试。
 //!
-//! 阶段1: 两个键都禁用AI → 按任何键都不应有音频
-//! 阶段2: 仅键1=AI → 只有键1有音频
-//! 阶段3: 仅键2=AI → 只有键2有音频
-//! 阶段4: 两个键都AI → 两个键都有音频
+//! 每次只测一个键的一种状态，按提示操作。
 
 use std::time::Instant;
+use std::io::{self, Write};
 
 fn send_command(control: &hidapi::HidDevice, byte2: u8, byte3: u8, byte14: u8, byte15: u8, byte17: u8, byte18: u8) -> bool {
     let mut report = [0u8; 64];
@@ -21,6 +19,20 @@ fn send_command(control: &hidapi::HidDevice, byte2: u8, byte3: u8, byte14: u8, b
     std::thread::sleep(std::time::Duration::from_millis(50));
     report[4] = 0x01;
     control.write(&report).unwrap_or(0) == 64
+}
+
+fn wait_key() {
+    print!("按回车继续...");
+    let _ = io::stdout().flush();
+    let mut s = String::new();
+    let _ = io::stdin().read_line(&mut s);
+}
+
+struct TestCase {
+    name: &'static str,
+    byte2: u8, byte3: u8, byte14: u8, byte15: u8, byte17: u8, byte18: u8,
+    key: &'static str,
+    expect: &'static str,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -39,55 +51,49 @@ fn main() -> anyhow::Result<()> {
         .find_map(|d| api.open_path(d.path()).ok());
 
     let Some(ref ctrl) = control else {
-        println!("未找到控制端点, 无法配置");
+        println!("未找到控制端点");
         return Ok(());
     };
 
-    // 阶段1: 两个键都禁用
-    println!("\n=== 阶段1: 两个键都禁用AI (byte2=0x00, byte3=0x00) ===");
-    println!("预期: 按任何键都不应有音频");
-    send_command(ctrl, 0x00, 0x00, 0x01, 0x02, 0x01, 0x02);
-    read_loop(&audio_dev, &cmd_dev, 15, "阶段1");
+    let tests = [
+        TestCase { name: "键1(前进) AI开启",  byte2: 0x10, byte3: 0x01, byte14: 0x01, byte15: 0x02, byte17: 0x00, byte18: 0x00, key: "前进键",  expect: "有音频" },
+        TestCase { name: "键1(前进) AI关闭",  byte2: 0x00, byte3: 0x00, byte14: 0x01, byte15: 0x02, byte17: 0x01, byte18: 0x02, key: "前进键",  expect: "无音频" },
+        TestCase { name: "键2(后退) AI开启",  byte2: 0x08, byte3: 0x01, byte14: 0x00, byte15: 0x00, byte17: 0x01, byte18: 0x02, key: "后退键",  expect: "有音频" },
+        TestCase { name: "键2(后退) AI关闭",  byte2: 0x00, byte3: 0x00, byte14: 0x01, byte15: 0x02, byte17: 0x01, byte18: 0x02, key: "后退键",  expect: "无音频" },
+    ];
 
-    // 阶段2: 仅键1=AI
-    println!("\n=== 阶段2: 仅键1(前进键)=AI (byte2=0x10, byte3=0x01) ===");
-    println!("预期: 按键1有音频, 按键2无音频");
-    send_command(ctrl, 0x10, 0x01, 0x00, 0x00, 0x01, 0x02);
-    read_loop(&audio_dev, &cmd_dev, 15, "阶段2");
+    for t in &tests {
+        println!("\n══════════════════════════════════════");
+        println!("测试: {}", t.name);
+        println!("配置: byte2={:#04X} byte3={:#04X}", t.byte2, t.byte3);
+        println!("操作: 长按【{}】", t.key);
+        println!("预期: {}", t.expect);
+        send_command(ctrl, t.byte2, t.byte3, t.byte14, t.byte15, t.byte17, t.byte18);
+        wait_key();
+        read_loop(&audio_dev, &cmd_dev, 8, t.name);
+    }
 
-    // 阶段3: 仅键2=AI
-    println!("\n=== 阶段3: 仅键2(后退键)=AI (byte2=0x08, byte3=0x01) ===");
-    println!("预期: 按键2有音频, 按键1无音频");
-    send_command(ctrl, 0x08, 0x01, 0x01, 0x02, 0x00, 0x00);
-    read_loop(&audio_dev, &cmd_dev, 15, "阶段3");
-
-    // 阶段4: 两个键都AI
-    println!("\n=== 阶段4: 两个键都AI (byte2=0x18, byte3=0x01) ===");
-    println!("预期: 两个键都有音频");
+    // 恢复
     send_command(ctrl, 0x18, 0x01, 0x00, 0x00, 0x00, 0x00);
-    read_loop(&audio_dev, &cmd_dev, 15, "阶段4");
-
-    println!("\n完成。");
+    println!("\n完成。已恢复两个键AI模式。");
     Ok(())
 }
 
 fn read_loop(audio: &hidapi::HidDevice, cmd: &hidapi::HidDevice, duration_secs: u64, label: &str) {
     let mut audio_buf = [0u8; 64];
     let mut cmd_buf = [0u8; 64];
-    let start = Instant::now();
-    let deadline = start + std::time::Duration::from_secs(duration_secs);
+    let deadline = Instant::now() + std::time::Duration::from_secs(duration_secs);
     let mut audio_count = 0u32;
+
+    println!("  (8秒测试窗口, 请长按)");
 
     while Instant::now() < deadline {
         if let Ok(64) = audio.read_timeout(&mut audio_buf, 50) {
             if audio_buf[0] == 0xB1 && audio_buf[2] == 57 {
                 audio_count += 1;
-                if audio_count == 1 {
-                    let elapsed = Instant::now().duration_since(start).as_secs_f64();
-                    print!("\n  [音频开始 t={:.1}s] ", elapsed);
-                }
+                if audio_count == 1 { print!("  音频: "); }
                 print!(".");
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let _ = io::stdout().flush();
             }
         }
         if let Ok(n) = cmd.read_timeout(&mut cmd_buf, 10) {
@@ -99,8 +105,8 @@ fn read_loop(audio: &hidapi::HidDevice, cmd: &hidapi::HidDevice, duration_secs: 
         }
     }
     if audio_count > 0 {
-        println!("\n  {}: 收到 {} 个音频包", label, audio_count);
+        println!("\n  结果: 收到 {} 个音频包 — {}", audio_count, if label.contains("关闭") { "❌ 异常(应有音频)" } else { "✓ 正常" });
     } else {
-        println!("\n  {}: 无音频 ✓", label);
+        println!("\n  结果: 无音频 — {}", if label.contains("关闭") { "✓ 正常" } else { "❌ 异常(应有音频)" });
     }
 }
