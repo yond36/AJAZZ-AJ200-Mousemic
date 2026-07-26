@@ -84,7 +84,7 @@ fn read_loop(audio: &hidapi::HidDevice, cmd: &hidapi::HidDevice, duration_secs: 
                 audio_count += 1;
                 if audio_count == 1 {
                     let elapsed = Instant::now().duration_since(start).as_secs_f64();
-                    print!("\n  [音频开始 t={:.1f}s] ", elapsed);
+                    print!("\n  [音频开始 t={:.1}s] ", elapsed);
                 }
                 print!(".");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
