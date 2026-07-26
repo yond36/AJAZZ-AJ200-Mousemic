@@ -201,10 +201,13 @@ pub struct Connected {
 /// 设置 AI 键: fwd=true 启用前进键AI, bwd=true 启用后退键AI。
 /// 匹配 ai_key_control.js 协议。
 pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
-    let mask = (if fwd { 0x10u8 } else { 0x00 }) | (if bwd { 0x08u8 } else { 0x00 });
-    let enable = if fwd || bwd { 0x01 } else { 0x00 };
-    let (bw_short, bw_long) = if bwd { (0, 0) } else { (1, 1) };
-    let (fw_short, fw_long) = if fwd { (0, 0) } else { (2, 2) };
+    // mask = 要配置的键 (bit4=前进, bit3=后退), enable = AI 总开关
+    let (mask, enable, bw_short, bw_long, fw_short, fw_long) = match (fwd, bwd) {
+        (true, true)   => (0x18u8, 0x01u8, 0u8, 0u8, 0u8, 0u8),
+        (true, false)  => (0x10u8, 0x01u8, 1u8, 1u8, 0u8, 0u8),
+        (false, true)  => (0x08u8, 0x01u8, 0u8, 0u8, 2u8, 2u8),
+        (false, false) => (0x18u8, 0x00u8, 1u8, 1u8, 2u8, 2u8), // mask=0x18!
+    };
 
     let mut report = [0u8; 32];
     report[0] = 0x0b;

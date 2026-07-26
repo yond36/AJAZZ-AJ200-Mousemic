@@ -200,9 +200,6 @@ impl Bridge {
             if stop.load(Ordering::SeqCst) { break; }
             let now = self.start.elapsed().as_secs_f64();
 
-            // ---- 轮询 Consumer Control (0x0C 按键事件) ----
-            self.poll_consumer();
-
             // ---- 周期性探测链路 ----
             if now - self.last_probe >= PROBE_INTERVAL {
                 self.last_probe = now;
@@ -233,7 +230,7 @@ impl Bridge {
                 }
             }
 
-            // ---- 读取音频包 ----
+            // ---- 读取音频包 (优先) ----
             let read_res = match &mut self.audio {
                 Some(d) => d.read_timeout(&mut buf, 200),
                 None => { std::thread::sleep(Duration::from_millis(200)); continue; }
@@ -310,6 +307,9 @@ impl Bridge {
                     continue;
                 }
             }
+
+            // ---- 轮询 Consumer Control (0x0C 按键事件, 放音频后以免干扰) ----
+            self.poll_consumer();
 
             // ---- 周期性汇报 ----
             let t = self.start.elapsed().as_secs_f64();
