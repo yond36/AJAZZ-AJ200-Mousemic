@@ -28,37 +28,25 @@ pub struct Bridge {
     api: HidApi,
     wired: HashSet<u16>,
     wireless: HashSet<u16>,
-    // 当前连接 (重连时整体替换)
     audio: Option<HidDevice>,
     cmd: Option<HidDevice>,
+    control: Option<HidDevice>,
     current_path: Option<String>,
     current_pid: u16,
     current_ps: String,
-    // 控制端点 (AI 键模式切换, usage_page=0xffa0)
-    control: Option<HidDevice>,
-    // mSBC 解码器 (每次重连重建)
     decoder: Option<MsbcDecoder>,
-    // 双联动热键 (键A / 键B), 对应 AI 键映射 mode=true/false
-    hotkey_a: Option<HotKey>,
-    hotkey_name_a: Option<String>,
-    hotkey_b: Option<HotKey>,
-    hotkey_name_b: Option<String>,
-    // AI 按键模式切换
-    ai_mode_a: bool,        // true=键A激活, false=键B激活
-    ai_mode_locked: bool,   // 音频活跃时锁住模式不切换
-    last_ai_switch: f64,
-    dual_mode: bool,        // 双键模式才交替, 单键锁定
-    // 运行期统计
+    hotkey: Option<HotKey>,
+    ai_key_a: bool,         // true=键A, false=键B
     n_pkts: u64,
     n_dec_ok: u64,
     n_dec_fail: u64,
     fail_streak: u32,
     last_audio: f64,
-    hotkey_engaged: bool,   // 当前有任一热键在按下状态
+    hotkey_engaged: bool,
     last_probe: f64,
     audio_started: bool,
     start: Instant,
-    /// 自动回车
+    hotkey_name: Option<String>,
     auto_enter: bool,
     auto_enter_mode: String,
     auto_enter_delay: f64,
@@ -73,67 +61,36 @@ impl Bridge {
         let wired = config.wired_pids();
         let wireless = config.wireless_pids();
 
-        let mut hotkey_a = None;
-        let mut hotkey_name_a = None;
-        if let Some(name) = &config.effective_hotkey_a() {
+        let mut hotkey = None;
+        let mut hotkey_name = None;
+        if let Some(name) = &config.hotkey {
             match HotKey::new(name, &config.driver) {
-                Ok(h) => { hotkey_name_a = Some(name.clone()); hotkey_a = Some(h); }
-                Err(e) => log(&format!("热键 A 初始化失败 (将不联动): {}", e)),
+                Ok(h) => { hotkey_name = Some(name.clone()); hotkey = Some(h); }
+                Err(e) => log(&format!("热键初始化失败 (将不联动): {}", e)),
             }
         }
-        let mut hotkey_b = None;
-        let mut hotkey_name_b = None;
-        if let Some(name) = &config.effective_hotkey_b() {
-            match HotKey::new(name, &config.driver) {
-                Ok(h) => { hotkey_name_b = Some(name.clone()); hotkey_b = Some(h); }
-                Err(e) => log(&format!("热键 B 初始化失败 (将不联动): {}", e)),
-            }
-        }
-
-        let dual_mode = hotkey_a.is_some() && hotkey_b.is_some();
 
         Ok(Bridge {
-            api,
-            wired,
-            wireless,
-            audio: None,
-            cmd: None,
-            current_path: None,
-            current_pid: 0,
-            current_ps: String::new(),
-            control: None,
+            api, wired, wireless,
+            audio: None, cmd: None, control: None,
+            current_path: None, current_pid: 0, current_ps: String::new(),
             decoder: None,
-            hotkey_a,
-            hotkey_name_a,
-            hotkey_b,
-            hotkey_name_b,
-            ai_mode_a: true,
-            ai_mode_locked: false,
-            last_ai_switch: 0.0,
-            dual_mode,
-            n_pkts: 0,
-            n_dec_ok: 0,
-            n_dec_fail: 0,
-            fail_streak: 0,
-            last_audio: 0.0,
-            hotkey_engaged: false,
-            last_probe: 0.0,
-            audio_started: false,
-            start: Instant::now(),
+            hotkey, hotkey_name,
+            ai_key_a: config.ai_key == "a",
+            n_pkts: 0, n_dec_ok: 0, n_dec_fail: 0, fail_streak: 0,
+            last_audio: 0.0, hotkey_engaged: false, last_probe: 0.0,
+            audio_started: false, start: Instant::now(),
             auto_enter: config.auto_enter,
             auto_enter_mode: config.auto_enter_mode.clone(),
             auto_enter_delay: config.auto_enter_delay,
-            voice_ended_at: None,
-            auto_enter_sent: false,
+            voice_ended_at: None, auto_enter_sent: false,
         })
     }
 
     /// 断开当前连接, 释放解码器/设备/热键握手。重连前必调用。
     fn disconnect(&mut self) {
-        if let Some(hk) = &mut self.hotkey_a { hk.release(); }
-        if let Some(hk) = &mut self.hotkey_b { hk.release(); }
+        if let Some(hk) = &mut self.hotkey { hk.release(); }
         self.hotkey_engaged = false;
-        self.ai_mode_locked = false;
         self.decoder = None;
         if let Some(d) = self.audio.take() { drop(d); }
         if let Some(c) = self.cmd.take() { drop(c); }
@@ -164,27 +121,9 @@ impl Bridge {
         self.current_pid = c.pid;
         self.current_ps = c.product_string;
 
-        // 初始 AI 键模式: 双键模式默认 A, 单键模式按配置锁定
-        if self.dual_mode {
-            self.ai_mode_a = true;
-            self.ai_mode_locked = false;
-            if let Some(ref ctrl) = self.control {
-                hid::set_ai_key_mode(ctrl, true);
-            }
-        } else if self.hotkey_a.is_some() {
-            // 只有键 A → 锁在 A 模式
-            self.ai_mode_a = true;
-            self.ai_mode_locked = true;
-            if let Some(ref ctrl) = self.control {
-                hid::set_ai_key_mode(ctrl, true);
-            }
-        } else if self.hotkey_b.is_some() {
-            // 只有键 B → 锁在 B 模式
-            self.ai_mode_a = false;
-            self.ai_mode_locked = true;
-            if let Some(ref ctrl) = self.control {
-                hid::set_ai_key_mode(ctrl, false);
-            }
+        // 设置 AI 语音键
+        if let Some(ref ctrl) = self.control {
+            hid::set_ai_key_mode(ctrl, self.ai_key_a);
         }
 
         match MsbcDecoder::new() {
@@ -339,32 +278,21 @@ impl Bridge {
                     }
                     self.n_pkts += 1;
                     self.last_audio = self.start.elapsed().as_secs_f64();
-                    // 新语音流入 → 重置自动回车状态
                     self.auto_enter_sent = false;
                     self.voice_ended_at = None;
-                    // 根据当前 AI 模式按下对应热键
-                    if !self.hotkey_engaged {
-                        // 先释放另一个热键
-                        if self.ai_mode_a {
-                            if let Some(hk) = &mut self.hotkey_b { hk.release(); }
-                        } else {
-                            if let Some(hk) = &mut self.hotkey_a { hk.release(); }
+                    if let Some(hk) = &mut self.hotkey {
+                        if !self.hotkey_engaged {
+                            self.hotkey_engaged = true;
+                            if let Some(name) = &self.hotkey_name {
+                                log(&format!("联动热键已激活: 按住 {}", name));
+                            }
                         }
-                        self.hotkey_engaged = true;
-                        self.ai_mode_locked = true;  // 有音频 → 锁住当前模式
-                        let name = if self.ai_mode_a { &self.hotkey_name_a } else { &self.hotkey_name_b };
-                        if let Some(n) = name {
-                            log(&format!("联动热键已激活 ({}键): 按住 {}", if self.ai_mode_a { "A" } else { "B" }, n));
-                        }
+                        hk.press();
                     }
-                    let current_hk = if self.ai_mode_a { &mut self.hotkey_a } else { &mut self.hotkey_b };
-                    if let Some(hk) = current_hk { hk.press(); }
                 }
                 Ok(_) => {}
                 Err(_) => {
                     log("鼠标连接中断, 尝试重新连接...");
-                    // 刷新枚举: 物理拔线后旧 path 可能还在缓存里, refresh 后
-                    // 残留条目若已消失即可避免重连时选回它。
                     let _ = self.api.refresh_devices();
                     let ex = self.current_path.clone();
                     if !self.connect(ex.as_deref(), log) {
@@ -376,7 +304,7 @@ impl Bridge {
                 }
             }
 
-            // ---- 周期性汇报语音包计数 (便于确认鼠标确实在发数据, 而不是静音/没连上) ----
+            // ---- 周期性汇报 ----
             let t = self.start.elapsed().as_secs_f64();
             if t - last_count_log >= 1.0 {
                 last_count_log = t;
@@ -391,33 +319,17 @@ impl Bridge {
                 }
             }
 
-            // ---- 热键松开判定 (固件有约 0.8s 拖尾, 拖尾里仍是真音频) ----
-            let was_engaged = self.hotkey_engaged;
-            if was_engaged
+            // ---- 热键松开判定 ----
+            if self.hotkey_engaged
                 && self.start.elapsed().as_secs_f64() - self.last_audio > crate::HOTKEY_IDLE_TIMEOUT
             {
-                if let Some(hk) = &mut self.hotkey_a { hk.release(); }
-                if let Some(hk) = &mut self.hotkey_b { hk.release(); }
+                if let Some(hk) = &mut self.hotkey { hk.release(); }
                 self.hotkey_engaged = false;
-                if self.dual_mode {
-                    self.ai_mode_locked = false;
-                }
-                // 热键刚松开 → 记录语音结束时刻 (用于自动回车)
                 if self.auto_enter && self.voice_ended_at.is_none() {
                     self.voice_ended_at = Some(Instant::now());
                     if debug {
                         log(&format!("语音结束, {}秒后自动按 {}", self.auto_enter_delay, self.auto_enter_mode));
                     }
-                }
-            }
-
-            // ---- AI 键模式切换 (双键模式且无音频时轮询) ----
-            let now = self.start.elapsed().as_secs_f64();
-            if self.dual_mode && !self.ai_mode_locked && self.control.is_some() && now - self.last_ai_switch > 0.3 {
-                self.last_ai_switch = now;
-                self.ai_mode_a = !self.ai_mode_a;
-                if let Some(ref ctrl) = self.control {
-                    hid::set_ai_key_mode(ctrl, self.ai_mode_a);
                 }
             }
 

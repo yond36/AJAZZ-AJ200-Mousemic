@@ -169,7 +169,6 @@ fn bridge_config(mode: &str, cable_device: &str, hotkey: &Option<String>, driver
     Config {
         mode: mode.to_string(),
         cable_device: cable_device.to_string(),
-        hotkey_a: hotkey.clone(),
         hotkey: hotkey.clone(),
         driver: driver.to_string(),
         ..Config::default()

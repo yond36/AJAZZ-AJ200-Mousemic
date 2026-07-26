@@ -41,8 +41,8 @@ struct AppState {
     // 配置镜像 (UI 即时态, 改了就写回 JSON)
     mode_play: bool,
     cable_device: String,
-    hotkey_a: String,
-    hotkey_b: String,
+    hotkey: String,
+    ai_key_a: bool,
     driver: String,
     autostart_on: bool,
     minimize_to_tray: bool,
@@ -79,8 +79,8 @@ impl Default for AppState {
         AppState {
             mode_play: true,
             cable_device: "CABLE Input".to_string(),
-            hotkey_a: "无".to_string(),
-            hotkey_b: "无".to_string(),
+            hotkey: "无".to_string(),
+            ai_key_a: true,
             driver: "sendinput".to_string(),
             autostart_on: false,
             minimize_to_tray: false,
@@ -158,20 +158,24 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, size: (300, 28), position: (80, 94))]
     cb_cable: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "联动键A:", position: (10, 128), size: (75, 22))]
-    lbl_hotkey_a: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "联动键:", position: (10, 128), size: (75, 22))]
+    lbl_hotkey: nwg::Label,
     #[nwg_control(parent: settings_frame, size: (170, 28), position: (85, 126))]
-    cb_hotkey_a: nwg::ComboBox<String>,
+    cb_hotkey: nwg::ComboBox<String>,
 
     #[nwg_control(parent: settings_frame, text: "注入方式:", position: (270, 128), size: (80, 22))]
     lbl_driver: nwg::Label,
     #[nwg_control(parent: settings_frame, size: (120, 28), position: (350, 126))]
     cb_driver: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "联动键B:", position: (10, 158), size: (75, 22))]
-    lbl_hotkey_b: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (170, 28), position: (85, 156))]
-    cb_hotkey_b: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "AI键:", position: (10, 160), size: (50, 22))]
+    lbl_ai_key: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "A", position: (65, 158), size: (50, 22), check_state: nwg::RadioButtonState::Checked)]
+    #[nwg_events( OnButtonClick: [GuiApp::on_ai_key_change] )]
+    rb_ai_key_a: nwg::RadioButton,
+    #[nwg_control(parent: settings_frame, text: "B", position: (120, 158), size: (50, 22))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_ai_key_change] )]
+    rb_ai_key_b: nwg::RadioButton,
 
     #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 224), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_autostart_change] )]
@@ -250,8 +254,8 @@ impl GuiApp {
         let cfg = Config::load();
         state.mode_play = cfg.mode == "play";
         state.cable_device = cfg.cable_device.clone();
-        state.hotkey_a = cfg.effective_hotkey_a().unwrap_or_else(|| "无".to_string());
-        state.hotkey_b = cfg.effective_hotkey_b().unwrap_or_else(|| "无".to_string());
+        state.hotkey = cfg.hotkey.clone().unwrap_or_else(|| "无".to_string());
+        state.ai_key_a = cfg.ai_key == "a";
         state.driver = cfg.driver.clone();
         state.autostart_on = cfg.autostart;
         state.minimize_to_tray = cfg.minimize_to_tray;
@@ -281,12 +285,18 @@ impl GuiApp {
         let st = self.state.borrow();
 
         // 填充下拉框
-        self.cb_hotkey_a.set_collection(st.hotkey_items.clone());
-        let hk_a_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_a).unwrap_or(0);
-        self.cb_hotkey_a.set_selection(Some(hk_a_idx));
-        self.cb_hotkey_b.set_collection(st.hotkey_items.clone());
-        let hk_b_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_b).unwrap_or(0);
-        self.cb_hotkey_b.set_selection(Some(hk_b_idx));
+        self.cb_hotkey.set_collection(st.hotkey_items.clone());
+        let hk_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey).unwrap_or(0);
+        self.cb_hotkey.set_selection(Some(hk_idx));
+
+        // AI 键选择
+        if st.ai_key_a {
+            self.rb_ai_key_a.set_check_state(nwg::RadioButtonState::Checked);
+            self.rb_ai_key_b.set_check_state(nwg::RadioButtonState::Unchecked);
+        } else {
+            self.rb_ai_key_b.set_check_state(nwg::RadioButtonState::Checked);
+            self.rb_ai_key_a.set_check_state(nwg::RadioButtonState::Unchecked);
+        }
 
         self.cb_driver.set_collection(st.driver_items.clone());
         let drv_idx = st
@@ -451,6 +461,12 @@ impl GuiApp {
 
     fn on_auto_enter_toggle(&self) {
         self.on_persist_setting();
+    }
+
+    fn on_ai_key_change(&self) {
+        let a = self.rb_ai_key_a.check_state() == nwg::RadioButtonState::Checked;
+        self.state.borrow_mut().ai_key_a = a;
+        self.persist_config();
     }
 
     fn on_debug_change(&self) {
@@ -664,12 +680,8 @@ impl GuiApp {
 
     fn current_config(&self) -> Config {
         let st = self.state.borrow();
-        let hotkey_a = self
-            .cb_hotkey_a.selection()
-            .and_then(|i| st.hotkey_items.get(i).cloned())
-            .unwrap_or_else(|| "无".to_string());
-        let hotkey_b = self
-            .cb_hotkey_b.selection()
+        let hotkey = self
+            .cb_hotkey.selection()
             .and_then(|i| st.hotkey_items.get(i).cloned())
             .unwrap_or_else(|| "无".to_string());
         let driver = self
@@ -679,9 +691,8 @@ impl GuiApp {
         Config {
             mode: if st.mode_play { "play".to_string() } else { "cable".to_string() },
             cable_device: self.cb_cable.selection_string().unwrap_or_else(|| st.cable_device.clone()),
-            hotkey_a: if hotkey_a == "无" { None } else { Some(hotkey_a.clone()) },
-            hotkey_b: if hotkey_b == "无" { None } else { Some(hotkey_b.clone()) },
-            hotkey: if hotkey_a == "无" { None } else { Some(hotkey_a) },
+            hotkey: if hotkey == "无" { None } else { Some(hotkey) },
+            ai_key: if st.ai_key_a { "a".to_string() } else { "b".to_string() },
             driver,
             minimize_to_tray: st.minimize_to_tray,
             auto_start_service: st.auto_start_service,
@@ -726,10 +737,9 @@ impl GuiApp {
             st.running = true;
             st.stop = Some(stop.clone());
             st.log_lines.push(format!(
-                "已启动: 模式={} 热键A={} 热键B={} 驱动={}",
+                "已启动: 模式={} 热键={} 驱动={}",
                 cfg.mode,
-                cfg.effective_hotkey_a().as_deref().unwrap_or("无"),
-                cfg.effective_hotkey_b().as_deref().unwrap_or("无"),
+                cfg.hotkey.as_deref().unwrap_or("无"),
                 cfg.driver
             ));
         }
