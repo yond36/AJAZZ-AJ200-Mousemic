@@ -197,24 +197,42 @@ pub struct Connected {
     pub product_string: String,
 }
 
-/// 切换 AI 语音键映射模式。
-/// mode=true → 键A 激活, mode=false → 键B 激活。
-/// 发送两次确保生效 (与 happyme531/aj200-mic 行为一致)。
-pub fn set_ai_key_mode(control: &HidDevice, mode: bool) -> bool {
+/// 开启 AI 语音功能 (使用官方驱动命令格式)。
+pub fn ai_on(control: &HidDevice) -> bool {
     let mut report = [0u8; 64];
-    report[0] = 0x0b;           // 控制端点 report ID
-    report[1] = 85;             // 0x55
-    report[2] = 26;             // 0x1A
-    report[3] = 24;             // 0x18
-    report[4] = if mode { 1 } else { 0 };  // AI key mode
-    let payload: [u8; 24] = [1,0,0,2,0,0,4,0,0,8,0,0,16,0,0,32,0,0,64,0,0,128,0,0];
-    for (i, b) in payload.iter().enumerate() {
-        report[5 + i] = *b;
-    }
+    report[0] = 0x0b;
+    report[1] = 0x55;
+    report[2] = 0x1a;
+    report[3] = 0x10;  // 0x10 = AI ON
+    report[5] = 0x01;
+    let payload: [u8; 21] = [0x02,0,0,0x04,0,0,0x08,0x01,0,0x10,0,0,0x20,0,0,0x40,0,0,0x80,0,0];
+    for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
     // 发送两次, 间隔 50ms
     if control.write(&report).unwrap_or(0) != 64 { return false; }
     std::thread::sleep(std::time::Duration::from_millis(50));
+    report[4] = 0x01;  // 第二次 byte[4]=1
     control.write(&report).unwrap_or(0) == 64
+}
+
+/// 关闭 AI 语音功能 (使用官方驱动命令格式)。
+pub fn ai_off(control: &HidDevice) -> bool {
+    let mut report = [0u8; 64];
+    report[0] = 0x0b;
+    report[1] = 0x55;
+    report[2] = 0x1a;
+    report[3] = 0x08;  // 0x08 = AI OFF
+    report[5] = 0x01;
+    let payload: [u8; 21] = [0x02,0,0,0x04,0,0,0x08,0x01,0,0x10,0,0,0x20,0,0,0x40,0,0,0x80,0,0];
+    for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
+    if control.write(&report).unwrap_or(0) != 64 { return false; }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    report[4] = 0x01;
+    control.write(&report).unwrap_or(0) == 64
+}
+
+/// 旧接口兼容
+pub fn set_ai_key_mode(control: &HidDevice, mode: bool) -> bool {
+    if mode { ai_on(control) } else { ai_off(control) }
 }
 
 /// 打开鼠标音频接口 + 命令通道。返回连接元组; 全部失败返回 None。

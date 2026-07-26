@@ -36,7 +36,6 @@ pub struct Bridge {
     current_ps: String,
     decoder: Option<MsbcDecoder>,
     hotkey: Option<HotKey>,
-    ai_key_a: bool,         // true=键A, false=键B
     n_pkts: u64,
     n_dec_ok: u64,
     n_dec_fail: u64,
@@ -76,7 +75,6 @@ impl Bridge {
             current_path: None, current_pid: 0, current_ps: String::new(),
             decoder: None,
             hotkey, hotkey_name,
-            ai_key_a: config.ai_key == "a",
             n_pkts: 0, n_dec_ok: 0, n_dec_fail: 0, fail_streak: 0,
             last_audio: 0.0, hotkey_engaged: false, last_probe: 0.0,
             audio_started: false, start: Instant::now(),
@@ -91,6 +89,10 @@ impl Bridge {
     fn disconnect(&mut self) {
         if let Some(hk) = &mut self.hotkey { hk.release(); }
         self.hotkey_engaged = false;
+        // 关闭 AI 语音功能
+        if let Some(ref ctrl) = self.control {
+            hid::ai_off(ctrl);
+        }
         self.decoder = None;
         if let Some(d) = self.audio.take() { drop(d); }
         if let Some(c) = self.cmd.take() { drop(c); }
@@ -121,9 +123,9 @@ impl Bridge {
         self.current_pid = c.pid;
         self.current_ps = c.product_string;
 
-        // 设置 AI 语音键
+        // 开启 AI 语音功能
         if let Some(ref ctrl) = self.control {
-            hid::set_ai_key_mode(ctrl, self.ai_key_a);
+            hid::ai_on(ctrl);
         }
 
         match MsbcDecoder::new() {

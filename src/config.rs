@@ -7,7 +7,6 @@ fn default_mode() -> String { "play".to_string() }
 fn default_cable() -> String { "CABLE Input".to_string() }
 fn default_driver() -> String { "sendinput".to_string() }
 fn default_auto_enter_mode() -> String { "enter".to_string() }
-fn default_ai_key() -> String { "a".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,9 +17,6 @@ pub struct Config {
     pub cable_device: String,
     /// 联动热键名; None = 不联动。可选值见 [`crate::hotkey::HOTKEY_NAMES`]。
     pub hotkey: Option<String>,
-    /// AI 语音键选择: "a" = 键A, "b" = 键B。
-    #[serde(default = "default_ai_key")]
-    pub ai_key: String,
     /// 热键注入方式: "sendinput" | "interception"。
     pub driver: String,
     /// 关闭窗口时最小化到托盘。
@@ -53,7 +49,6 @@ impl Default for Config {
             mode: default_mode(),
             cable_device: default_cable(),
             hotkey: Some("right_alt".to_string()),
-            ai_key: default_ai_key(),
             driver: default_driver(),
             minimize_to_tray: false,
             auto_start_service: false,

@@ -42,7 +42,6 @@ struct AppState {
     mode_play: bool,
     cable_device: String,
     hotkey: String,
-    ai_key_a: bool,
     driver: String,
     autostart_on: bool,
     minimize_to_tray: bool,
@@ -80,7 +79,6 @@ impl Default for AppState {
             mode_play: true,
             cable_device: "CABLE Input".to_string(),
             hotkey: "无".to_string(),
-            ai_key_a: true,
             driver: "sendinput".to_string(),
             autostart_on: false,
             minimize_to_tray: false,
@@ -168,16 +166,7 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, size: (120, 28), position: (350, 126))]
     cb_driver: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "AI键:", position: (10, 160), size: (50, 22))]
-    lbl_ai_key: nwg::Label,
-    #[nwg_control(parent: settings_frame, text: "A", position: (65, 158), size: (50, 22), check_state: nwg::RadioButtonState::Checked)]
-    #[nwg_events( OnButtonClick: [GuiApp::on_ai_key_change] )]
-    rb_ai_key_a: nwg::RadioButton,
-    #[nwg_control(parent: settings_frame, text: "B", position: (120, 158), size: (50, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_ai_key_change] )]
-    rb_ai_key_b: nwg::RadioButton,
-
-    #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 224), size: (85, 22))]
+    #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 194), size: (85, 22))]
     #[nwg_events( OnButtonClick: [GuiApp::on_autostart_change] )]
     chk_autostart: nwg::CheckBox,
     #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 224), size: (155, 22))]
@@ -255,7 +244,6 @@ impl GuiApp {
         state.mode_play = cfg.mode == "play";
         state.cable_device = cfg.cable_device.clone();
         state.hotkey = cfg.hotkey.clone().unwrap_or_else(|| "无".to_string());
-        state.ai_key_a = cfg.ai_key == "a";
         state.driver = cfg.driver.clone();
         state.autostart_on = cfg.autostart;
         state.minimize_to_tray = cfg.minimize_to_tray;
@@ -288,15 +276,6 @@ impl GuiApp {
         self.cb_hotkey.set_collection(st.hotkey_items.clone());
         let hk_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey).unwrap_or(0);
         self.cb_hotkey.set_selection(Some(hk_idx));
-
-        // AI 键选择
-        if st.ai_key_a {
-            self.rb_ai_key_a.set_check_state(nwg::RadioButtonState::Checked);
-            self.rb_ai_key_b.set_check_state(nwg::RadioButtonState::Unchecked);
-        } else {
-            self.rb_ai_key_b.set_check_state(nwg::RadioButtonState::Checked);
-            self.rb_ai_key_a.set_check_state(nwg::RadioButtonState::Unchecked);
-        }
 
         self.cb_driver.set_collection(st.driver_items.clone());
         let drv_idx = st
@@ -461,12 +440,6 @@ impl GuiApp {
 
     fn on_auto_enter_toggle(&self) {
         self.on_persist_setting();
-    }
-
-    fn on_ai_key_change(&self) {
-        let a = self.rb_ai_key_a.check_state() == nwg::RadioButtonState::Checked;
-        self.state.borrow_mut().ai_key_a = a;
-        self.persist_config();
     }
 
     fn on_debug_change(&self) {
@@ -692,7 +665,6 @@ impl GuiApp {
             mode: if st.mode_play { "play".to_string() } else { "cable".to_string() },
             cable_device: self.cb_cable.selection_string().unwrap_or_else(|| st.cable_device.clone()),
             hotkey: if hotkey == "无" { None } else { Some(hotkey) },
-            ai_key: if st.ai_key_a { "a".to_string() } else { "b".to_string() },
             driver,
             minimize_to_tray: st.minimize_to_tray,
             auto_start_service: st.auto_start_service,
