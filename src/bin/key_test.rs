@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
         send_command(ctrl, 0x18, 0x01, 0x00, 0x00, 0x00, 0x00);
         println!("已配置: 键1=AI, 键2=AI");
         println!("请分别短按和长按两个键各一次。10秒后自动进入阶段2...");
-        read_loop(&audio_dev, &cmd_dev, 10);
+        read_loop(&audio_dev, &cmd_dev, 20);
     }
 
     // 阶段2: 键1=AI, 键2=默认
@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
         send_command(ctrl, 0x10, 0x01, 0x00, 0x00, 0x01, 0x02);
         println!("已配置: 键1=AI, 键2=默认(非AI)");
         println!("请分别短按和长按两个键。10秒后结束...");
-        read_loop(&audio_dev, &cmd_dev, 10);
+        read_loop(&audio_dev, &cmd_dev, 20);
     }
 
     // 阶段3: 键1=默认, 键2=AI
@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
         send_command(ctrl, 0x08, 0x01, 0x01, 0x02, 0x00, 0x00);
         println!("已配置: 键1=默认, 键2=AI");
         println!("请分别短按和长按两个键。10秒后结束...");
-        read_loop(&audio_dev, &cmd_dev, 10);
+        read_loop(&audio_dev, &cmd_dev, 20);
     }
 
     // 恢复: 两个键都AI
