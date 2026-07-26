@@ -15,8 +15,10 @@ pub struct Config {
     pub mode: String,
     /// 虚拟声卡输入设备名, 如 "CABLE Input"。
     pub cable_device: String,
-    /// 联动热键名; None = 不联动。可选值见 [`crate::hotkey::HOTKEY_NAMES`]。
-    pub hotkey: Option<String>,
+    /// 前进键联动热键名; None或"无" = 不联动=禁用该键AI。
+    pub hotkey_forward: Option<String>,
+    /// 后退键联动热键名; None或"无" = 不联动=禁用该键AI。
+    pub hotkey_backward: Option<String>,
     /// 热键注入方式: "sendinput" | "interception"。
     pub driver: String,
     /// 关闭窗口时最小化到托盘。
@@ -48,7 +50,8 @@ impl Default for Config {
         Config {
             mode: default_mode(),
             cable_device: default_cable(),
-            hotkey: Some("right_alt".to_string()),
+            hotkey_forward: Some("right_alt".to_string()),
+            hotkey_backward: None,
             driver: default_driver(),
             minimize_to_tray: false,
             auto_start_service: false,

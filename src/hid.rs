@@ -192,45 +192,34 @@ pub struct Connected {
     pub audio: HidDevice,
     pub cmd: HidDevice,
     pub control: Option<HidDevice>,
+    pub consumer: Option<HidDevice>,  // Consumer Control, 读 0x0C 按键事件
     pub path: String,
     pub pid: u16,
     pub product_string: String,
 }
 
-/// 开启 AI 语音功能 (两键都启用)。
-pub fn ai_on(control: &HidDevice) -> bool {
+/// 设置 AI 键: fwd=true 启用前进键AI, bwd=true 启用后退键AI。
+/// 匹配 ai_key_control.js 协议。
+pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
+    let mask = (if fwd { 0x10u8 } else { 0x00 }) | (if bwd { 0x08u8 } else { 0x00 });
+    let enable = if fwd || bwd { 0x01 } else { 0x00 };
+    let (bw_short, bw_long) = if bwd { (0, 0) } else { (1, 1) };
+    let (fw_short, fw_long) = if fwd { (0, 0) } else { (2, 2) };
+
     let mut report = [0u8; 32];
     report[0] = 0x0b;
     report[1] = 0x55;
     report[2] = 0x1a;
-    report[3] = 0x18;  // mask = 两键
-    report[4] = 0x01;  // AI 启用
+    report[3] = mask;
+    report[4] = enable;
     report[5] = 0x01;
-    // bwShort=0(AI), bwLong=0(AI), fwShort=0(AI), fwLong=0(AI)
-    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,0,0, 0x10,0,0, 0x20,0,0, 0x40,0,0, 0x80,0];
+    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,bw_short,bw_long, 0x10,fw_short,fw_long, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
     control.write(&report).unwrap_or(0) == 32
 }
 
-/// 关闭 AI 语音功能 (两键恢复默认前进/后退行为)。
-pub fn ai_off(control: &HidDevice) -> bool {
-    let mut report = [0u8; 32];
-    report[0] = 0x0b;
-    report[1] = 0x55;
-    report[2] = 0x1a;
-    report[3] = 0x18;  // mask = 两键
-    report[4] = 0x00;  // AI 禁用
-    report[5] = 0x01;
-    // bwShort=1(默认), bwLong=1(默认), fwShort=2(默认), fwLong=2(默认)
-    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,1,1, 0x10,2,2, 0x20,0,0, 0x40,0,0, 0x80,0];
-    for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
-    control.write(&report).unwrap_or(0) == 32
-}
-
-/// 旧接口兼容
-pub fn set_ai_key_mode(control: &HidDevice, mode: bool) -> bool {
-    if mode { ai_on(control) } else { ai_off(control) }
-}
+pub fn ai_on(control: &HidDevice) -> bool { set_ai_keys(control, true, true) }
+pub fn ai_off(control: &HidDevice) -> bool { set_ai_keys(control, false, false) }
 
 /// 打开鼠标音频接口 + 命令通道。返回连接元组; 全部失败返回 None。
 /// log: 可选诊断回调。
@@ -263,10 +252,17 @@ pub fn connect_audio(
                         && dd.usage_page() == 0xffa0
                         && dd.usage() == 0x0002)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
+                let consumer = api.device_list()
+                    .filter(|dd| dd.vendor_id() == 0x363C
+                        && dd.product_id() == d.product_id
+                        && dd.usage_page() == 0x000c
+                        && dd.usage() == 0x0001)
+                    .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
                 return Some(Connected {
                     audio,
                     cmd,
                     control,
+                    consumer,
                     path: d.path.clone(),
                     pid: d.product_id,
                     product_string: d.product_string.clone(),

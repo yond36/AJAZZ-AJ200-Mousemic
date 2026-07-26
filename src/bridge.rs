@@ -1,15 +1,6 @@
-//! 主桥接循环: 读 HID 音频包 -> 解码 mSBC -> 输出 PCM (经 sink) -> 热键注入 -> 断线重连/链路切换。
+//! 主桥接循环: 读 Consumer Control(0x0C) 区分按键 + HID 音频包 -> 解码 mSBC -> 输出 PCM。
 //!
-//! 忠实移植自 Python 的 `run_bridge()`。关键策略:
-//! - 按 product_string 自动分类有线/无线 (无线带 "2.4G"、有线带 "Mouse", 与 PID 无关),
-//!   已知鼠标保持"有线优先"; 同系列换 PID 也能自动识别。
-//! - 用"激活握手是否成功"判断链路真实在线, 而非仅凭 HID 枚举 (Windows 拔线后条目会残留)。
-//! - 每 ~1.5s 探测一次: 插线 -> 切有线; 拔线 -> 切回无线; 全断开 -> 等重连 (不退出)。
-//! - 切换/断开后**重建 mSBC 解码器**: 解码器有状态, 旧设备的半截帧会卡坏状态、迟迟不同步,
-//!   表现为"能切换但不出声"; 重建即复刻 Python 手动停止再启动时的行为。
-//!
-//! 注意: `Bridge` 持有 `HidDevice`, 必须在**同一个线程内**创建并使用 (不要跨线程移动)。
-//! GUI 应在工作线程里构造并 `run`, 而不是把 Bridge 传过线程边界。
+//! 双键联动: 前进键/后退键独立绑定不同热键。热键为 "无" 则该键 AI 功能禁用。
 
 use crate::config::Config;
 use crate::hid;
@@ -21,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// 探测在线链路的间隔 (秒)。
 const PROBE_INTERVAL: f64 = 1.5;
 
 pub struct Bridge {
@@ -31,21 +21,26 @@ pub struct Bridge {
     audio: Option<HidDevice>,
     cmd: Option<HidDevice>,
     control: Option<HidDevice>,
+    consumer: Option<HidDevice>,
     current_path: Option<String>,
     current_pid: u16,
     current_ps: String,
     decoder: Option<MsbcDecoder>,
-    hotkey: Option<HotKey>,
+    hotkey_fwd: Option<HotKey>,
+    hotkey_fwd_name: Option<String>,
+    hotkey_bwd: Option<HotKey>,
+    hotkey_bwd_name: Option<String>,
     n_pkts: u64,
     n_dec_ok: u64,
     n_dec_fail: u64,
     fail_streak: u32,
     last_audio: f64,
     hotkey_engaged: bool,
+    hotkey_engaged_key: Option<u8>,   // 当前按下的热键是哪个 (0x08/0x04)
+    active_key: Option<u8>,   // 0x08=forward, 0x04=backward
     last_probe: f64,
     audio_started: bool,
     start: Instant,
-    hotkey_name: Option<String>,
     auto_enter: bool,
     auto_enter_mode: String,
     auto_enter_delay: f64,
@@ -54,30 +49,36 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// 构造桥接器 (在目标工作线程内调用)。会初始化 HID 并预建热键。
     pub fn new(config: &Config, log: &dyn Fn(&str)) -> anyhow::Result<Self> {
         let api = HidApi::new().map_err(|e| anyhow::anyhow!("初始化 HID 失败: {}", e))?;
         let wired = config.wired_pids();
         let wireless = config.wireless_pids();
 
-        let mut hotkey = None;
-        let mut hotkey_name = None;
-        if let Some(name) = &config.hotkey {
-            match HotKey::new(name, &config.driver) {
-                Ok(h) => { hotkey_name = Some(name.clone()); hotkey = Some(h); }
-                Err(e) => log(&format!("热键初始化失败 (将不联动): {}", e)),
+        let mk_hotkey = |name: &Option<String>, driver: &str, label: &str, log: &dyn Fn(&str)|
+            -> (Option<HotKey>, Option<String>)
+        {
+            match name.as_deref() {
+                Some(n) if n != "无" => match HotKey::new(n, driver) {
+                    Ok(h) => (Some(h), Some(n.to_string())),
+                    Err(e) => { log(&format!("{}热键初始化失败: {}", label, e)); (None, None) }
+                },
+                _ => (None, None),
             }
-        }
+        };
+
+        let (hotkey_fwd, hotkey_fwd_name) = mk_hotkey(&config.hotkey_forward, &config.driver, "前进", log);
+        let (hotkey_bwd, hotkey_bwd_name) = mk_hotkey(&config.hotkey_backward, &config.driver, "后退", log);
 
         Ok(Bridge {
             api, wired, wireless,
-            audio: None, cmd: None, control: None,
+            audio: None, cmd: None, control: None, consumer: None,
             current_path: None, current_pid: 0, current_ps: String::new(),
             decoder: None,
-            hotkey, hotkey_name,
+            hotkey_fwd, hotkey_fwd_name,
+            hotkey_bwd, hotkey_bwd_name,
             n_pkts: 0, n_dec_ok: 0, n_dec_fail: 0, fail_streak: 0,
-            last_audio: 0.0, hotkey_engaged: false, last_probe: 0.0,
-            audio_started: false, start: Instant::now(),
+            last_audio: 0.0, hotkey_engaged: false, hotkey_engaged_key: None, active_key: None,
+            last_probe: 0.0, audio_started: false, start: Instant::now(),
             auto_enter: config.auto_enter,
             auto_enter_mode: config.auto_enter_mode.clone(),
             auto_enter_delay: config.auto_enter_delay,
@@ -85,68 +86,99 @@ impl Bridge {
         })
     }
 
-    /// 断开当前连接, 释放解码器/设备/热键握手。重连前必调用。
     fn disconnect(&mut self) {
-        if let Some(hk) = &mut self.hotkey { hk.release(); }
+        if let Some(hk) = &mut self.hotkey_fwd { hk.release(); }
+        if let Some(hk) = &mut self.hotkey_bwd { hk.release(); }
         self.hotkey_engaged = false;
+        self.hotkey_engaged_key = None;
+        self.active_key = None;
         if let Some(ref ctrl) = self.control {
             hid::ai_off(ctrl);
         }
         self.decoder = None;
-        if let Some(d) = self.audio.take() { drop(d); }
-        if let Some(c) = self.cmd.take() { drop(c); }
-        if let Some(ctrl) = self.control.take() { drop(ctrl); }
+        drop(self.audio.take());
+        drop(self.cmd.take());
+        drop(self.control.take());
+        drop(self.consumer.take());
         self.current_path = None;
         self.current_pid = 0;
         self.current_ps.clear();
     }
 
-    /// 关闭旧连接并重建: 找到在线音频链路 -> 握手 -> 打开 -> 重建解码器。
-    /// 成功返回 true (新句柄已写入 self), 失败返回 false。
     fn connect(&mut self, exclude_path: Option<&str>, log: &dyn Fn(&str)) -> bool {
         self.disconnect();
-        let connected = hid::connect_audio(
-            &self.api,
-            &self.wired,
-            &self.wireless,
-            exclude_path,
-            log,
-        );
-        let Some(c) = connected else {
-            return false;
-        };
+        let connected = hid::connect_audio(&self.api, &self.wired, &self.wireless, exclude_path, log);
+        let Some(c) = connected else { return false; };
+
+        // 按配置决定哪些键启用 AI
+        let fwd_enabled = self.hotkey_fwd_name.is_some();
+        let bwd_enabled = self.hotkey_bwd_name.is_some();
+        if let Some(ref ctrl) = c.control {
+            hid::set_ai_keys(ctrl, fwd_enabled, bwd_enabled);
+        }
+
         self.audio = Some(c.audio);
         self.cmd = Some(c.cmd);
         self.control = c.control;
+        self.consumer = c.consumer;
         self.current_path = Some(c.path);
         self.current_pid = c.pid;
         self.current_ps = c.product_string;
 
-        // 开启 AI 语音功能
-        if let Some(ref ctrl) = self.control {
-            hid::ai_on(ctrl);
-        }
-
         match MsbcDecoder::new() {
-            Ok(d) => {
-                self.decoder = Some(d);
-                true
-            }
-            Err(e) => {
-                log(&format!("sbc 解码器初始化失败: {}", e));
-                false
+            Ok(d) => { self.decoder = Some(d); true }
+            Err(e) => { log(&format!("sbc 解码器初始化失败: {}", e)); false }
+        }
+    }
+
+    fn mode_label(&self) -> &'static str {
+        hid::classify_label(hid::classify_link(&self.current_ps, &self.wired, &self.wireless, self.current_pid))
+    }
+
+    /// 从 Consumer Control 接口读 0x0C 按键事件，设置 active_key。
+    /// 同时处理按键释放 → 释放热键。
+    fn poll_consumer(&mut self) {
+        let consumer = match &mut self.consumer {
+            Some(c) => c, None => return,
+        };
+        let mut buf = [0u8; 64];
+        loop {
+            match consumer.read_timeout(&mut buf, 1) {
+                Ok(n) if n > 0 && buf[0] == 0x0C => {
+                    let key = buf[1];
+                    let state = buf[2];
+                    if state == 0xEE && (key == 0x08 || key == 0x04) {
+                        self.active_key = Some(key);
+                    } else if state == 0x00 {
+                        self.active_key = None;
+                        if self.hotkey_engaged {
+                            // 释放当前热键
+                            match self.hotkey_engaged_key {
+                                Some(0x08) => { if let Some(ref mut hk) = self.hotkey_fwd { hk.release(); } }
+                                Some(0x04) => { if let Some(ref mut hk) = self.hotkey_bwd { hk.release(); } }
+                                _ => {}
+                            }
+                            self.hotkey_engaged = false;
+                            if self.auto_enter && self.voice_ended_at.is_none() {
+                                self.voice_ended_at = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
+                Ok(_) => { break; }
+                Err(_) => { break; }
             }
         }
     }
 
-    /// 当前链路的有线/无线标签 ("有线"/"无线"/"未知")。
-    fn mode_label(&self) -> &'static str {
-        let link = hid::classify_link(&self.current_ps, &self.wired, &self.wireless, self.current_pid);
-        hid::classify_label(link)
+    fn release_active_hotkey(&mut self, engaged_key: u8) {
+        match engaged_key {
+            0x08 => { if let Some(ref mut hk) = self.hotkey_fwd { hk.release(); } }
+            0x04 => { if let Some(ref mut hk) = self.hotkey_bwd { hk.release(); } }
+            _ => {}
+        }
     }
 
-    /// 主循环。`sink` 接收解码出的 16k mono i16 PCM 切片 (由调用方决定写到声卡还是文件)。
-    /// `stop` 置位后干净退出。
     pub fn run(
         &mut self,
         sink: &mut dyn FnMut(&[i16]),
@@ -156,40 +188,30 @@ impl Bridge {
         log: &dyn Fn(&str),
     ) -> anyhow::Result<()> {
         if !self.connect(None, log) {
-            return Err(anyhow::anyhow!(
-                "未找到鼠标音频 HID 接口 (usage_page=0xFFAA)。请确认鼠标已连接(无线接收器或数据线)。"
-            ));
+            return Err(anyhow::anyhow!("未找到鼠标音频 HID 接口。请确认鼠标已连接。"));
         }
-        log(&format!(
-            "已连接鼠标音频接口 ({}模式), 等待语音键...",
-            self.mode_label()
-        ));
+        log(&format!("已连接 ({}模式), 等待语音键...", self.mode_label()));
 
         let mut last_count_log = 0.0f64;
         let mut last_cb_total: usize = 0;
         let mut buf = [0u8; 64];
+
         loop {
-            if stop.load(Ordering::SeqCst) {
-                break;
-            }
+            if stop.load(Ordering::SeqCst) { break; }
             let now = self.start.elapsed().as_secs_f64();
 
-            // ---- 周期性探测链路 (有线优先, 残留设备自动跳过) ----
-            // 关键: hidapi Rust crate 的 device_list() 返回的是内部缓存快照, 必须
-            // 先 refresh_devices() 才能看到热插拔后的新设备。Python 版每次
-            // hid.enumerate() 都是新枚举, 故无此问题。少了这步 refresh, 插线后
-            // live_link 永远看不到新链路 -> 热插拔自动切换完全失效。
+            // ---- 轮询 Consumer Control (0x0C 按键事件) ----
+            self.poll_consumer();
+
+            // ---- 周期性探测链路 ----
             if now - self.last_probe >= PROBE_INTERVAL {
                 self.last_probe = now;
-                // 刷新 HID 枚举快照 (拔插设备后才能探测到)。失败仅记日志, 不阻断。
                 if let Err(e) = self.api.refresh_devices() {
                     log(&format!("HID 枚举刷新失败: {}", e));
                 }
                 match hid::live_link(&self.api, &self.wired, &self.wireless) {
                     None => {
-                        if self.current_path.is_some() {
-                            log("鼠标已断开, 等待重新连接...");
-                        }
+                        if self.current_path.is_some() { log("鼠标已断开, 等待重新连接..."); }
                         if !self.connect(None, log) {
                             std::thread::sleep(Duration::from_millis(500));
                             continue;
@@ -198,16 +220,7 @@ impl Bridge {
                     }
                     Some(live) => {
                         if self.current_path.as_deref() != Some(&live.path) {
-                            let link = hid::classify_link(
-                                &live.product_string,
-                                &self.wired,
-                                &self.wireless,
-                                live.product_id,
-                            );
-                            log(&format!(
-                                "检测到链路变化, 切换到{}模式...",
-                                hid::classify_label(link)
-                            ));
+                            log(&format!("检测到链路变化, 切换到{}模式...", hid::classify_label(hid::classify_link(&live.product_string, &self.wired, &self.wireless, live.product_id))));
                             if self.connect(None, log) {
                                 log(&format!("已切换至{}模式。", self.mode_label()));
                             } else {
@@ -220,35 +233,23 @@ impl Bridge {
                 }
             }
 
-            // ---- 读取音频包 (200ms 超时, 自带节奏, 不会忙等) ----
+            // ---- 读取音频包 ----
             let read_res = match &mut self.audio {
                 Some(d) => d.read_timeout(&mut buf, 200),
-                None => {
-                    std::thread::sleep(Duration::from_millis(200));
-                    continue;
-                }
+                None => { std::thread::sleep(Duration::from_millis(200)); continue; }
             };
 
             match read_res {
-                Ok(n) if n == 64
-                    && buf[0] == crate::REPORT_ID
-                    && buf[2] == crate::AUDIO_PAYLOAD_LEN =>
-                {
+                Ok(n) if n == 64 && buf[0] == crate::REPORT_ID && buf[2] == crate::AUDIO_PAYLOAD_LEN => {
                     if self.decoder.is_none() {
-                        // 兜底: connect 已建解码器, 极端情况下若为空则重建
                         match MsbcDecoder::new() {
-                            Ok(d) => {
-                                self.decoder = Some(d);
-                                log("检测到语音输入, 已启动音频解码。");
-                                self.audio_started = true;
-                            }
+                            Ok(d) => { self.decoder = Some(d); log("检测到语音输入, 已启动音频解码。"); self.audio_started = true; }
                             Err(e) => log(&format!("解码器启动失败: {}", e)),
                         }
                     }
                     if let Some(dec) = &mut self.decoder {
                         match dec.decode_frame(&buf[3..60]) {
                             Some(pcm) => {
-                                // s16le 字节 -> i16 切片 (每帧 240 字节 = 120 样本)
                                 let mut samples = Vec::with_capacity(pcm.len() / 2);
                                 let mut i = 0;
                                 while i + 1 < pcm.len() {
@@ -262,15 +263,10 @@ impl Bridge {
                             None => {
                                 self.n_dec_fail += 1;
                                 self.fail_streak += 1;
-                                // 连续解码失败: 重建 mSBC 解码器以恢复帧同步。
-                                // sbc 为有状态解码器 (含分析滤波器历史), 偶发失步后需重 init 才能继续产出。
                                 if self.fail_streak >= 2 {
                                     self.fail_streak = 0;
                                     match MsbcDecoder::new() {
-                                        Ok(d) => {
-                                            self.decoder = Some(d);
-                                            log("解码器重建以恢复 mSBC 帧同步");
-                                        }
+                                        Ok(d) => { self.decoder = Some(d); log("解码器重建以恢复 mSBC 帧同步"); }
                                         Err(e) => log(&format!("解码器重建失败: {}", e)),
                                     }
                                 }
@@ -281,14 +277,24 @@ impl Bridge {
                     self.last_audio = self.start.elapsed().as_secs_f64();
                     self.auto_enter_sent = false;
                     self.voice_ended_at = None;
-                    if let Some(hk) = &mut self.hotkey {
-                        if !self.hotkey_engaged {
+
+                    // 语音来了, 按下对应热键
+                    if !self.hotkey_engaged && self.active_key.is_some() {
+                        let key = self.active_key.unwrap();
+                        let (hk, name): (Option<&mut HotKey>, Option<&str>) = match key {
+                            0x08 => (self.hotkey_fwd.as_mut(), self.hotkey_fwd_name.as_deref()),
+                            0x04 => (self.hotkey_bwd.as_mut(), self.hotkey_bwd_name.as_deref()),
+                            _ => (None, None),
+                        };
+                        if let (Some(hk), Some(name)) = (hk, name) {
                             self.hotkey_engaged = true;
-                            if let Some(name) = &self.hotkey_name {
-                                log(&format!("联动热键已激活: 按住 {}", name));
+                            self.hotkey_engaged_key = Some(key);
+                            if debug {
+                                let key_label = if key == 0x08 { "前进" } else { "后退" };
+                                log(&format!("联动热键已激活: 按住 {} ({}键)", name, key_label));
                             }
+                            hk.press();
                         }
-                        hk.press();
                     }
                 }
                 Ok(_) => {}
@@ -313,28 +319,25 @@ impl Bridge {
                     let (q, cb_total) = diag();
                     let cb_delta = cb_total.saturating_sub(last_cb_total);
                     last_cb_total = cb_total;
-                    log(&format!(
-                        "语音包={} 解码OK={} 解码失败={} 队列≈{} 回调+{}次/秒 累计{}次 最近音频{:.1}s前",
-                        self.n_pkts, self.n_dec_ok, self.n_dec_fail, q, cb_delta, cb_total, t - self.last_audio
-                    ));
+                    log(&format!("语音包={} 解码OK={} 失败={} 队列≈{} 回调+{}次/秒 最近音频{:.1}s前",
+                        self.n_pkts, self.n_dec_ok, self.n_dec_fail, q, cb_delta, t - self.last_audio));
                 }
             }
 
-            // ---- 热键松开判定 ----
-            if self.hotkey_engaged
-                && self.start.elapsed().as_secs_f64() - self.last_audio > crate::HOTKEY_IDLE_TIMEOUT
-            {
-                if let Some(hk) = &mut self.hotkey { hk.release(); }
+            // ---- 热键松开 (音频停止后) ----
+            if self.hotkey_engaged && self.start.elapsed().as_secs_f64() - self.last_audio > crate::HOTKEY_IDLE_TIMEOUT {
+                if let Some(key) = self.hotkey_engaged_key {
+                    self.release_active_hotkey(key);
+                }
                 self.hotkey_engaged = false;
+                self.hotkey_engaged_key = None;
                 if self.auto_enter && self.voice_ended_at.is_none() {
                     self.voice_ended_at = Some(Instant::now());
-                    if debug {
-                        log(&format!("语音结束, {}秒后自动按 {}", self.auto_enter_delay, self.auto_enter_mode));
-                    }
+                    if debug { log(&format!("语音结束, {}秒后自动按 {}", self.auto_enter_delay, self.auto_enter_mode)); }
                 }
             }
 
-            // ---- 自动回车: 语音结束后延迟按 Enter / Ctrl+Enter ----
+            // ---- 自动回车 ----
             if self.auto_enter && !self.auto_enter_sent {
                 if let Some(end) = self.voice_ended_at {
                     if end.elapsed().as_secs_f64() >= self.auto_enter_delay {
@@ -343,22 +346,14 @@ impl Bridge {
                             "ctrl_enter" => crate::hotkey::inject_ctrl_enter(),
                             _ => crate::hotkey::inject_enter(),
                         }
-                        if debug {
-                            log(&format!("自动回车: {}", self.auto_enter_mode));
-                        }
+                        if debug { log(&format!("自动回车: {}", self.auto_enter_mode)); }
                     }
                 }
             }
         }
 
-        if self.audio_started {
-            log(&format!("已处理 {} 个语音包。", self.n_pkts));
-        }
-        if stop.load(Ordering::SeqCst) {
-            log("桥接已正常停止。");
-        } else {
-            log("桥接已退出。");
-        }
+        if self.audio_started { log(&format!("已处理 {} 个语音包。", self.n_pkts)); }
+        log(if stop.load(Ordering::SeqCst) { "桥接已正常停止。" } else { "桥接已退出。" });
         Ok(())
     }
 }

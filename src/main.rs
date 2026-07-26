@@ -166,10 +166,13 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn bridge_config(mode: &str, cable_device: &str, hotkey: &Option<String>, driver: &str) -> Config {
+    let hotkey_forward = hotkey.clone();
+    let hotkey_backward = hotkey.clone();
     Config {
         mode: mode.to_string(),
         cable_device: cable_device.to_string(),
-        hotkey: hotkey.clone(),
+        hotkey_forward,
+        hotkey_backward,
         driver: driver.to_string(),
         ..Config::default()
     }

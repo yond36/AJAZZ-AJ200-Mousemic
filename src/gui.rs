@@ -41,7 +41,8 @@ struct AppState {
     // 配置镜像 (UI 即时态, 改了就写回 JSON)
     mode_play: bool,
     cable_device: String,
-    hotkey: String,
+    hotkey_fwd: String,
+    hotkey_bwd: String,
     driver: String,
     autostart_on: bool,
     minimize_to_tray: bool,
@@ -78,7 +79,8 @@ impl Default for AppState {
         AppState {
             mode_play: true,
             cable_device: "CABLE Input".to_string(),
-            hotkey: "无".to_string(),
+            hotkey_fwd: "无".to_string(),
+            hotkey_bwd: "无".to_string(),
             driver: "sendinput".to_string(),
             autostart_on: false,
             minimize_to_tray: false,
@@ -156,14 +158,19 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, size: (300, 28), position: (80, 94))]
     cb_cable: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "联动键:", position: (10, 128), size: (75, 22))]
-    lbl_hotkey: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (170, 28), position: (85, 126))]
-    cb_hotkey: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "前进键:", position: (10, 128), size: (65, 22))]
+    lbl_hotkey_fwd: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (90, 28), position: (75, 126))]
+    cb_hotkey_fwd: nwg::ComboBox<String>,
 
-    #[nwg_control(parent: settings_frame, text: "注入方式:", position: (270, 128), size: (80, 22))]
+    #[nwg_control(parent: settings_frame, text: "后退键:", position: (175, 128), size: (65, 22))]
+    lbl_hotkey_bwd: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (90, 28), position: (240, 126))]
+    cb_hotkey_bwd: nwg::ComboBox<String>,
+
+    #[nwg_control(parent: settings_frame, text: "注入方式:", position: (345, 128), size: (75, 22))]
     lbl_driver: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (120, 28), position: (350, 126))]
+    #[nwg_control(parent: settings_frame, size: (100, 28), position: (420, 126))]
     cb_driver: nwg::ComboBox<String>,
 
     // ---- 自动回车 ----
@@ -243,7 +250,8 @@ impl GuiApp {
         let cfg = Config::load();
         state.mode_play = cfg.mode == "play";
         state.cable_device = cfg.cable_device.clone();
-        state.hotkey = cfg.hotkey.clone().unwrap_or_else(|| "无".to_string());
+        state.hotkey_fwd = cfg.hotkey_forward.clone().unwrap_or_else(|| "无".to_string());
+        state.hotkey_bwd = cfg.hotkey_backward.clone().unwrap_or_else(|| "无".to_string());
         state.driver = cfg.driver.clone();
         state.autostart_on = cfg.autostart;
         state.minimize_to_tray = cfg.minimize_to_tray;
@@ -273,9 +281,13 @@ impl GuiApp {
         let st = self.state.borrow();
 
         // 填充下拉框
-        self.cb_hotkey.set_collection(st.hotkey_items.clone());
-        let hk_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey).unwrap_or(0);
-        self.cb_hotkey.set_selection(Some(hk_idx));
+        self.cb_hotkey_fwd.set_collection(st.hotkey_items.clone());
+        let fwd_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_fwd).unwrap_or(0);
+        self.cb_hotkey_fwd.set_selection(Some(fwd_idx));
+
+        self.cb_hotkey_bwd.set_collection(st.hotkey_items.clone());
+        let bwd_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_bwd).unwrap_or(0);
+        self.cb_hotkey_bwd.set_selection(Some(bwd_idx));
 
         self.cb_driver.set_collection(st.driver_items.clone());
         let drv_idx = st
@@ -653,8 +665,12 @@ impl GuiApp {
 
     fn current_config(&self) -> Config {
         let st = self.state.borrow();
-        let hotkey = self
-            .cb_hotkey.selection()
+        let hotkey_fwd = self
+            .cb_hotkey_fwd.selection()
+            .and_then(|i| st.hotkey_items.get(i).cloned())
+            .unwrap_or_else(|| "无".to_string());
+        let hotkey_bwd = self
+            .cb_hotkey_bwd.selection()
             .and_then(|i| st.hotkey_items.get(i).cloned())
             .unwrap_or_else(|| "无".to_string());
         let driver = self
@@ -664,7 +680,8 @@ impl GuiApp {
         Config {
             mode: if st.mode_play { "play".to_string() } else { "cable".to_string() },
             cable_device: self.cb_cable.selection_string().unwrap_or_else(|| st.cable_device.clone()),
-            hotkey: if hotkey == "无" { None } else { Some(hotkey) },
+            hotkey_forward: if hotkey_fwd == "无" { None } else { Some(hotkey_fwd) },
+            hotkey_backward: if hotkey_bwd == "无" { None } else { Some(hotkey_bwd) },
             driver,
             minimize_to_tray: st.minimize_to_tray,
             auto_start_service: st.auto_start_service,
@@ -709,9 +726,10 @@ impl GuiApp {
             st.running = true;
             st.stop = Some(stop.clone());
             st.log_lines.push(format!(
-                "已启动: 模式={} 热键={} 驱动={}",
+                "已启动: 模式={} 前进={} 后退={} 驱动={}",
                 cfg.mode,
-                cfg.hotkey.as_deref().unwrap_or("无"),
+                cfg.hotkey_forward.as_deref().unwrap_or("无"),
+                cfg.hotkey_backward.as_deref().unwrap_or("无"),
                 cfg.driver
             ));
         }
