@@ -215,13 +215,14 @@ pub fn ai_on(control: &HidDevice) -> bool {
     control.write(&report).unwrap_or(0) == 64
 }
 
-/// 关闭 AI 语音功能 (使用官方驱动命令格式)。
+/// 关闭 AI 语音功能 (使用官方驱动命令格式, 0x10 表示键1, byte[4]=0 表示关闭)。
 pub fn ai_off(control: &HidDevice) -> bool {
     let mut report = [0u8; 64];
     report[0] = 0x0b;
     report[1] = 0x55;
     report[2] = 0x1a;
-    report[3] = 0x08;  // 0x08 = AI OFF
+    report[3] = 0x10;  // 0x10 = 键1
+    report[4] = 0x00;  // 0x00 = 关闭 AI
     report[5] = 0x01;
     let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,0x01,0, 0x10,0,0, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
