@@ -16,9 +16,11 @@ fn send_command(control: &hidapi::HidDevice, byte2: u8, byte3: u8, byte14: u8, b
     let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,byte14,byte15, 0x10,byte17,byte18, 0x20,0,0, 0x40,0,0, 0x80,0];
     for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
     if control.write(&report).unwrap_or(0) != 64 { return false; }
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(300));
     report[4] = 0x01;
-    control.write(&report).unwrap_or(0) == 64
+    if control.write(&report).unwrap_or(0) != 64 { return false; }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    true
 }
 
 fn wait_key() {
@@ -69,6 +71,7 @@ fn main() -> anyhow::Result<()> {
         println!("操作: 长按【{}】", t.key);
         println!("预期: {}", t.expect);
         send_command(ctrl, t.byte2, t.byte3, t.byte14, t.byte15, t.byte17, t.byte18);
+        std::thread::sleep(std::time::Duration::from_millis(500)); // 等固件生效
         wait_key();
         read_loop(&audio_dev, &cmd_dev, 8, t.name);
     }
