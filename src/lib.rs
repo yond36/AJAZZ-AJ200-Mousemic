@@ -19,6 +19,7 @@ extern crate anyhow;
 pub mod audio;
 pub mod bridge;
 pub mod config;
+pub mod devices;
 pub mod dialog;
 pub mod error;
 pub mod hid;

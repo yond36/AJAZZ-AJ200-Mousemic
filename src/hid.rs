@@ -4,7 +4,7 @@
 //! 注意: hidapi Rust crate 的 `DeviceInfo` 访问方式 (`vendor_id()` 等方法 / `path()` 返回类型)
 //! 在不同小版本可能略有差异; 若编译报字段/方法不匹配, 按 hidapi 文档微调即可 (逻辑不变)。
 
-use crate::{AUDIO_USAGE_PAGE, CMD_USAGE_PAGES, VID};
+use crate::{devices, AUDIO_USAGE_PAGE, CMD_USAGE_PAGES, VID};
 use hidapi::{HidApi, HidDevice};
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -77,10 +77,10 @@ pub fn classify_label(link: &str) -> &'static str {
     }
 }
 
-/// 枚举所有 AJAZZ 音频接口 (usage_page=0xFFAA)。
+/// 枚举所有支持的 AJAZZ 音频接口 (usage_page=0xFFAA, PID 须命中 devices::SUPPORTED_DEVICES)。
 pub fn enumerate_audio(api: &HidApi) -> Vec<AjazzDevice> {
     api.device_list()
-        .filter(|d| d.vendor_id() == VID && d.usage_page() == AUDIO_USAGE_PAGE)
+        .filter(|d| d.vendor_id() == VID && d.usage_page() == AUDIO_USAGE_PAGE && devices::is_supported(d.product_id()))
         .map(|d| AjazzDevice {
             path: d.path().to_string_lossy().into_owned(),
             product_id: d.product_id(),
@@ -140,7 +140,7 @@ pub fn find_command_paths(api: &HidApi, audio_pid: Option<u16>) -> Vec<String> {
     if paths.is_empty() {
         for &up in &CMD_USAGE_PAGES {
             for d in api.device_list() {
-                if d.vendor_id() == VID && d.usage_page() == up {
+                if d.vendor_id() == VID && d.usage_page() == up && devices::is_supported(d.product_id()) {
                     let p = d.path().to_string_lossy().into_owned();
                     if seen.insert(p.clone()) {
                         paths.push(p);
@@ -250,7 +250,7 @@ pub fn connect_audio(
 ) -> Option<Connected> {
     let candidates = priority_order(api, wired_pids, wireless_pids, exclude_path);
     if candidates.is_empty() {
-        log("未找到鼠标音频 HID 接口 (usage_page=0xFFAA)。请确认鼠标已连接(无线接收器或数据线)。");
+        log("未找到受支持的 AJ200 系列鼠标音频 HID 接口 (usage_page=0xFFAA)。请确认鼠标已连接(无线接收器或数据线), 且型号在支持列表内。");
         return None;
     }
     let mut tried = Vec::new();
@@ -328,6 +328,11 @@ pub fn list_hid(log: &dyn Fn(&str)) {
         let mut mark = String::new();
         if vid == VID {
             mark.push_str("  <== AJAZZ");
+            if let Some(desc) = devices::describe_pid(pid) {
+                mark.push_str(&format!("  [{}]", desc));
+            } else {
+                mark.push_str("  [不支持的PID]");
+            }
             let cl = classify_link(prod, &HashSet::new(), &HashSet::new(), pid);
             if cl == "wired" {
                 mark.push_str("  [有线]");

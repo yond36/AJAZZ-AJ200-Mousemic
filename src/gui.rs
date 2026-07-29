@@ -12,7 +12,6 @@
 //! 主线程。事件回调是 `&self`, 运行态字段用 `RefCell<AppState>` 提供内部可变性。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -114,7 +113,7 @@ pub struct GuiApp {
     state: RefCell<AppState>,
 
     // ---- 顶层窗口 ----
-    #[nwg_control(size: (580, 782), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_control(size: (580, 826), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
     #[nwg_events( OnWindowClose: [GuiApp::on_close] )]
     window: nwg::Window,
 
@@ -127,25 +126,25 @@ pub struct GuiApp {
     lbl_status: nwg::Label,
 
     // ---- 依赖检查 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 170), position: (20, 76), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 214), position: (20, 76), flags: "VISIBLE|BORDER")]
     deps_frame: nwg::Frame,
-    #[nwg_control(parent: deps_frame, position: (10, 24), size: (300, 118), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
+    #[nwg_control(parent: deps_frame, position: (10, 24), size: (420, 178), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
     deps_list: nwg::TextBox,
-    #[nwg_control(parent: deps_frame, text: "检查依赖", position: (320, 24), size: (110, 30))]
+    #[nwg_control(parent: deps_frame, text: "检查依赖", position: (440, 24), size: (90, 30))]
     #[nwg_events( OnButtonClick: [GuiApp::refresh_deps] )]
     btn_check_deps: nwg::Button,
-    #[nwg_control(parent: deps_frame, text: "诊断 HID", position: (320, 60), size: (110, 30))]
+    #[nwg_control(parent: deps_frame, text: "诊断 HID", position: (440, 60), size: (90, 30))]
     #[nwg_events( OnButtonClick: [GuiApp::diag_hid] )]
     btn_diag_hid: nwg::Button,
-    #[nwg_control(parent: deps_frame, text: "列出设备", position: (320, 96), size: (110, 30))]
+    #[nwg_control(parent: deps_frame, text: "列出设备", position: (440, 96), size: (90, 30))]
     #[nwg_events( OnButtonClick: [GuiApp::list_devices_btn] )]
     btn_list_dev: nwg::Button,
-    #[nwg_control(parent: deps_frame, text: "安装依赖", position: (320, 130), size: (110, 30))]
+    #[nwg_control(parent: deps_frame, text: "安装依赖", position: (440, 132), size: (90, 30))]
     #[nwg_events( OnButtonClick: [GuiApp::install_deps] )]
     btn_install_deps: nwg::Button,
 
     // ---- 设置 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 260), position: (20, 254), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 260), position: (20, 298), flags: "VISIBLE|BORDER")]
     settings_frame: nwg::Frame,
 
     #[nwg_control(parent: settings_frame, text: "输出模式", position: (10, 24), size: (75, 22))]
@@ -214,18 +213,18 @@ pub struct GuiApp {
     chk_debug: nwg::CheckBox,
 
     // ---- 启停按钮 (直接在 window 上) ----
-    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 524), size: (130, 36))]
+    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 568), size: (130, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::start_bridge] )]
     btn_start: nwg::Button,
-    #[nwg_control(parent: window, text: "■ 停止", position: (160, 524), size: (130, 36))]  
+    #[nwg_control(parent: window, text: "■ 停止", position: (160, 568), size: (130, 36))]  
     #[nwg_events( OnButtonClick: [GuiApp::stop_bridge] )]
     btn_stop: nwg::Button,
-    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 524), size: (140, 36))]
+    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 568), size: (140, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::hide_to_tray] )]
     btn_hide: nwg::Button,
 
     // ---- 日志 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 190), position: (20, 574), flags: "VISIBLE|BORDER")]
+    #[nwg_control(parent: window, size: (540, 190), position: (20, 618), flags: "VISIBLE|BORDER")]
     log_frame: nwg::Frame,
     #[nwg_control(parent: log_frame, position: (10, 24), size: (520, 150), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
     log_box: nwg::TextBox,
@@ -385,8 +384,9 @@ impl GuiApp {
     // ---------- 窗口/托盘 ----------
 
     fn on_close(&self) {
-        let minimize = self.state.borrow().minimize_to_tray;
-        if minimize {
+        // 服务运行中: 关闭按钮 = 最小化到托盘; 停止状态: 退出程序。
+        let running = self.state.borrow().running;
+        if running {
             self.window.set_visible(false);
             self.tray.set_visibility(true);
         } else {
@@ -556,15 +556,66 @@ impl GuiApp {
             st.log_lines.join("\r\n")
         };
         self.log_box.set_text(&text);
-        // 滚到底: 用 Win32 EM_SCROLLCARET 等价 — nwg TextBox 无直接 API, 借用选区移到末尾
-        let len = text.len();
-        self.log_box.set_selection((len as u32)..(len as u32));
+        self.scroll_log_to_bottom();
+    }
+
+    /// 把日志框滚动到最后一行 (EM_LINESCROLL, 保证新日志可见)。
+    fn scroll_log_to_bottom(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        use windows::Win32::Foundation::{WPARAM, LPARAM};
+        const EM_GETLINECOUNT: u32 = 0x00BA;
+        const EM_LINESCROLL: u32 = 0x00B6;
+        if let Some(raw) = self.log_box.handle.hwnd() {
+            unsafe {
+                let h = windows::Win32::Foundation::HWND(raw as _);
+                let lines = SendMessageW(h, EM_GETLINECOUNT, WPARAM(0), LPARAM(0)).0;
+                if lines > 1 {
+                    SendMessageW(h, EM_LINESCROLL, WPARAM(0), LPARAM(lines - 1));
+                }
+            }
+        }
     }
 
     // ---------- 依赖检查 ----------
 
+    /// 检测 AJ200 系列鼠标。返回 (状态行, 附加信息行)。
+    fn detect_mouse() -> (String, Vec<String>) {
+        use hidapi::HidApi;
+        let api = match HidApi::new() {
+            Ok(a) => a,
+            Err(_) => return ("检测失败 (HID 初始化错误)".into(), vec![]),
+        };
+        // 按 PID 去重收集命中的支持设备 (任一接口命中即算)
+        let mut seen: Vec<u16> = Vec::new();
+        for d in api.device_list() {
+            if d.vendor_id() == crate::VID && crate::devices::is_supported(d.product_id()) {
+                if !seen.contains(&d.product_id()) {
+                    seen.push(d.product_id());
+                }
+            }
+        }
+        if seen.is_empty() {
+            return ("未检测到 (AJ200 系列)".into(), vec![]);
+        }
+        seen.sort();
+        let mut names: Vec<String> = Vec::new();
+        let mut info: Vec<String> = Vec::new();
+        for pid in &seen {
+            let desc = crate::devices::describe_pid(*pid).unwrap_or_default();
+            names.push(desc.clone());
+            info.push(format!("{}  PID=0x{:04X}", desc, pid));
+        }
+        (names.join(" / "), info)
+    }
+
     fn refresh_deps(&self) {
-        let mut map: HashMap<&str, String> = HashMap::new();
+        let mut items: Vec<(String, String)> = Vec::new();
+        let mut extra: Vec<String> = Vec::new();
+
+        // 鼠标 (AJ200 系列, PID 白名单识别)
+        let (mouse_status, mouse_info) = Self::detect_mouse();
+        items.push(("鼠标".to_string(), mouse_status));
+        extra.extend(mouse_info);
 
         // VB-CABLE 虚拟音频设备
         let mut found_cable = false;
@@ -578,7 +629,7 @@ impl GuiApp {
                 }
             }
         }
-        map.insert("VB-CABLE", if found_cable { "已安装".into() } else { "未检测到".into() });
+        items.push(("VB-CABLE".to_string(), if found_cable { "已安装".into() } else { "未检测到".into() }));
 
         // Interception 驱动 (可选) — 检查 DLL + 内核驱动
         let mut dll = false;
@@ -619,11 +670,17 @@ impl GuiApp {
             else if driver { "缺 DLL".into() }
             else if dll { "缺驱动".into() }
             else { "未安装".into() };
-        map.insert("Interception", status);
+        items.push(("Interception".to_string(), status));
 
         let mut s = String::new();
-        for (k, v) in &map {
+        for (k, v) in &items {
             s.push_str(&format!("{}: {}\r\n", k, v));
+        }
+        if !extra.is_empty() {
+            s.push_str("\r\n");
+            for line in &extra {
+                s.push_str(&format!("{}\r\n", line));
+            }
         }
         self.deps_list.set_text(&s);
     }

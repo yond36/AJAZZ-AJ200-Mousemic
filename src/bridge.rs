@@ -111,7 +111,7 @@ impl Bridge {
         self.current_ps.clear();
     }
 
-    fn connect(&mut self, exclude_path: Option<&str>, log: &dyn Fn(&str)) -> bool {
+    fn connect(&mut self, exclude_path: Option<&str>, debug: bool, log: &dyn Fn(&str)) -> bool {
         self.disconnect();
         let connected = hid::connect_audio(&self.api, &self.wired, &self.wireless, exclude_path, log);
         let Some(c) = connected else { return false; };
@@ -120,9 +120,9 @@ impl Bridge {
         if let Some(ref ctrl) = c.control {
             std::thread::sleep(Duration::from_millis(50));
             hid::ai_on(ctrl);
-            log("AI键配置: 前进=AI 后退=AI");
-        } else {
-            log("警告: 未找到 control 接口 (usage_page=0xFFA0), AI键配置无法生效");
+            if debug { log("AI键配置: 前进=AI 后退=AI"); }
+        } else if debug {
+            log("未找到 control 接口 (usage_page=0xFFA0), AI键配置无法生效");
         }
 
         self.audio = Some(c.audio);
@@ -215,7 +215,7 @@ impl Bridge {
         debug: bool,
         log: &dyn Fn(&str),
     ) -> anyhow::Result<()> {
-        if !self.connect(None, log) {
+        if !self.connect(None, debug, log) {
             return Err(anyhow::anyhow!("未找到鼠标音频 HID 接口。请确认鼠标已连接。"));
         }
         log(&format!("已连接 ({}模式), 等待语音键...", self.mode_label()));
@@ -237,7 +237,7 @@ impl Bridge {
                 match hid::live_link(&self.api, &self.wired, &self.wireless) {
                     None => {
                         if self.current_path.is_some() { log("鼠标已断开, 等待重新连接..."); }
-                        if !self.connect(None, log) {
+                        if !self.connect(None, debug, log) {
                             std::thread::sleep(Duration::from_millis(500));
                             continue;
                         }
@@ -246,7 +246,7 @@ impl Bridge {
                     Some(live) => {
                         if self.current_path.as_deref() != Some(&live.path) {
                             log(&format!("检测到链路变化, 切换到{}模式...", hid::classify_label(hid::classify_link(&live.product_string, &self.wired, &self.wireless, live.product_id))));
-                            if self.connect(None, log) {
+                            if self.connect(None, debug, log) {
                                 log(&format!("已切换至{}模式。", self.mode_label()));
                             } else {
                                 log("切换失败, 继续重试...");
@@ -350,7 +350,7 @@ impl Bridge {
                     log("鼠标连接中断, 尝试重新连接...");
                     let _ = self.api.refresh_devices();
                     let ex = self.current_path.clone();
-                    if !self.connect(ex.as_deref(), log) {
+                    if !self.connect(ex.as_deref(), debug, log) {
                         std::thread::sleep(Duration::from_millis(500));
                     } else {
                         log(&format!("已重新连接 ({}模式)。", self.mode_label()));
