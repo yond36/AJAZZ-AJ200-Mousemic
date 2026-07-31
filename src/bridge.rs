@@ -22,6 +22,9 @@ pub struct Bridge {
     cmd: Option<HidDevice>,
     control: Option<HidDevice>,
     consumer: Option<HidDevice>,
+    battery: Option<HidDevice>,
+    battery_pct: Option<u8>,
+    battery_charging: bool,
     current_path: Option<String>,
     current_pid: u16,
     current_ps: String,
@@ -73,7 +76,8 @@ impl Bridge {
 
         Ok(Bridge {
             api, wired, wireless,
-            audio: None, cmd: None, control: None, consumer: None,
+            audio: None, cmd: None, control: None, consumer: None, battery: None,
+            battery_pct: None, battery_charging: false,
             current_path: None, current_pid: 0, current_ps: String::new(),
             decoder: None,
             hotkey_fwd, hotkey_fwd_name,
@@ -106,6 +110,9 @@ impl Bridge {
         drop(self.cmd.take());
         drop(self.control.take());
         drop(self.consumer.take());
+        drop(self.battery.take());
+        self.battery_pct = None;
+        self.battery_charging = false;
         self.current_path = None;
         self.current_pid = 0;
         self.current_ps.clear();
@@ -116,11 +123,19 @@ impl Bridge {
         let connected = hid::connect_audio(&self.api, &self.wired, &self.wireless, exclude_path, log);
         let Some(c) = connected else { return false; };
 
-        // 启动时开启双键 AI
+        // 按配置决定哪些键启用 AI
         if let Some(ref ctrl) = c.control {
+            let fwd = self.hotkey_fwd_name.is_some();
+            let bwd = self.hotkey_bwd_name.is_some();
             std::thread::sleep(Duration::from_millis(50));
-            hid::ai_on(ctrl);
-            if debug { log("AI键配置: 前进=AI 后退=AI"); }
+            hid::set_ai_keys(ctrl, fwd, bwd);
+            if debug {
+                let fh = self.hotkey_fwd_name.as_deref().unwrap_or("无");
+                let bh = self.hotkey_bwd_name.as_deref().unwrap_or("无");
+                log(&format!("AI键: 前进={}({}) 后退={}({})",
+                    if fwd { "启用" } else { "禁用" }, fh,
+                    if bwd { "启用" } else { "禁用" }, bh));
+            }
         } else if debug {
             log("未找到 control 接口 (usage_page=0xFFA0), AI键配置无法生效");
         }
@@ -129,6 +144,7 @@ impl Bridge {
         self.cmd = Some(c.cmd);
         self.control = c.control;
         self.consumer = c.consumer;
+        self.battery = c.battery;
         self.current_path = Some(c.path);
         self.current_pid = c.pid;
         self.current_ps = c.product_string;
@@ -214,6 +230,7 @@ impl Bridge {
         stop: &Arc<AtomicBool>,
         debug: bool,
         log: &dyn Fn(&str),
+        battery_cb: &dyn Fn(u8, bool),
     ) -> anyhow::Result<()> {
         if !self.connect(None, debug, log) {
             return Err(anyhow::anyhow!("未找到鼠标音频 HID 接口。请确认鼠标已连接。"));
@@ -374,6 +391,26 @@ impl Bridge {
                     last_cb_total = cb_total;
                     log(&format!("语音包={} 解码OK={} 失败={} 队列≈{} 回调+{}次/秒 最近音频{:.1}s前",
                         self.n_pkts, self.n_dec_ok, self.n_dec_fail, q, cb_delta, t - self.last_audio));
+                }
+            }
+
+            // ---- 轮询电池状态上报 (0xFFA0 usage=0x0002, 被动上报) ----
+            if let Some(ref bat) = self.battery {
+                let mut bbuf = [0u8; 64];
+                loop {
+                    match bat.read_timeout(&mut bbuf, 0) {
+                        Ok(n) if n > 0 => {
+                            if let Some((pct, charging)) = hid::parse_battery(&bbuf[..n]) {
+                                let changed = self.battery_pct != Some(pct) || self.battery_charging != charging;
+                                self.battery_pct = Some(pct);
+                                self.battery_charging = charging;
+                                if changed {
+                                    battery_cb(pct, charging);
+                                }
+                            }
+                        }
+                        _ => break,
+                    }
                 }
             }
 

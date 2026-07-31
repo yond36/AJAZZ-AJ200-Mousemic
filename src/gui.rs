@@ -33,6 +33,7 @@ use crate::{hid, single_instance, SAMPLE_RATE};
 enum Msg {
     Log(String),
     Running(bool),
+    Battery(u8, bool), // 电量%, 是否充电中
 }
 
 /// 运行态 (与 UI 控件分离, 用 RefCell 在 `&self` 回调里修改)。
@@ -75,6 +76,10 @@ struct AppState {
 
     // 启动后首次收进托盘
     pending_hide: bool,
+
+    // 电池提醒状态 (防重复提醒)
+    battery_low_notified: bool,
+    battery_full_notified: bool,
 }
 
 impl Default for AppState {
@@ -103,6 +108,8 @@ impl Default for AppState {
             typeless_fwd: false,
             typeless_bwd: false,
             pending_hide: false,
+            battery_low_notified: false,
+            battery_full_notified: false,
         }
     }
 }
@@ -124,6 +131,8 @@ pub struct GuiApp {
     // ---- 状态 ----
     #[nwg_control(parent: window, text: "● 已停止", position: (20, 46), size: (200, 20))]
     lbl_status: nwg::Label,
+    #[nwg_control(parent: window, text: "电量: --", position: (240, 46), size: (320, 20))]
+    lbl_battery: nwg::Label,
 
     // ---- 依赖检查 (Frame 容器 + 子控件) ----
     #[nwg_control(parent: window, size: (540, 214), position: (20, 76), flags: "VISIBLE|BORDER")]
@@ -523,6 +532,15 @@ impl GuiApp {
                 match m {
                     Msg::Log(line) => self.append_log(&line),
                     Msg::Running(r) => running_changed = Some(r),
+                    Msg::Battery(pct, charging) => {
+                        let txt = if charging {
+                            format!("电量: {}% 充电中", pct)
+                        } else {
+                            format!("电量: {}%", pct)
+                        };
+                        self.lbl_battery.set_text(&txt);
+                        self.on_battery_update(pct, charging);
+                    }
                 }
             }
             if let Some(r) = running_changed {
@@ -540,6 +558,44 @@ impl GuiApp {
         self.lbl_status.set_text(if running { "● 运行中" } else { "● 已停止" });
         self.btn_start.set_enabled(!running);
         self.btn_stop.set_enabled(running);
+    }
+
+    /// 电池状态更新: 低电量(<10%)与充满(100%充电中)时弹托盘气泡提醒,
+    /// 每轮只提醒一次, 状态恢复后重新武装。
+    fn on_battery_update(&self, pct: u8, charging: bool) {
+        // 先在借用内决定动作, 借用结束后再执行 (避免嵌套 borrow_mut)
+        let mut actions: Vec<(String, String, String)> = Vec::new(); // (日志, 标题, 正文)
+        {
+            let mut st = self.state.borrow_mut();
+            // 低电量提醒: 低于/等于 10% 提醒一次, 回到 10% 以上后重新武装
+            if pct <= 10 && !st.battery_low_notified {
+                st.battery_low_notified = true;
+                actions.push((
+                    format!("低电量提醒: {}%", pct),
+                    "鼠标电量不足".to_string(),
+                    format!("电量仅剩 {}%，请及时充电。", pct),
+                ));
+            } else if pct > 10 {
+                st.battery_low_notified = false;
+            }
+            // 充满提醒: 充电中且 100% 提醒一次, 拔掉充电线后重新武装
+            if charging && pct >= 100 && !st.battery_full_notified {
+                st.battery_full_notified = true;
+                actions.push((
+                    "充电完成提醒: 电池已充满".to_string(),
+                    "鼠标已充满".to_string(),
+                    "电池已充满，可以拔掉充电线。".to_string(),
+                ));
+            } else if !charging && pct < 100 {
+                st.battery_full_notified = false;
+            }
+        }
+        for (log_line, title, body) in actions {
+            self.append_log(&log_line);
+            // 托盘气泡提醒 (无需注册 AUMID, 可靠)
+            let flags = nwg::TrayNotificationFlags::INFO_ICON | nwg::TrayNotificationFlags::LARGE_ICON;
+            self.tray.show(&body, Some(&title), Some(flags), Some(&self.icon));
+        }
     }
 
     // ---------- 日志 ----------
@@ -822,6 +878,10 @@ impl GuiApp {
             let log = move |m: &str| {
                 let _ = log_tx2.send(Msg::Log(m.to_string()));
             };
+            let bat_tx = msg_tx.clone();
+            let battery_cb = move |pct: u8, charging: bool| {
+                let _ = bat_tx.send(Msg::Battery(pct, charging));
+            };
             let _ = msg_tx.send(Msg::Running(true));
 
             let device_name = if cfg.mode == "play" { None } else { Some(cfg.cable_device.as_str()) };
@@ -831,7 +891,7 @@ impl GuiApp {
                     let mut sink = |s: &[i16]| audio.push_pcm(s);
                     match Bridge::new(&cfg, &log) {
                         Ok(mut bridge) => {
-                            if let Err(e) = bridge.run(&mut sink, &|| audio.diagnostics(), &stop_clone, debug, &log) {
+                            if let Err(e) = bridge.run(&mut sink, &|| audio.diagnostics(), &stop_clone, debug, &log, &battery_cb) {
                                 log(&format!("桥接错误: {}", e));
                             }
                         }
@@ -862,6 +922,12 @@ impl GuiApp {
         }
         self.state.borrow_mut().running = false;
         self.update_run_state_ui(false);
+        self.lbl_battery.set_text("电量: --");
+        {
+            let mut st = self.state.borrow_mut();
+            st.battery_low_notified = false;
+            st.battery_full_notified = false;
+        }
         self.append_log("桥接已停止。");
     }
 }

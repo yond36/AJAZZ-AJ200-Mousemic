@@ -1,11 +1,10 @@
 //! 按键区分测试: 打开所有 AJAZZ 接口，异步方式读 0x0C 事件。
 //! 关键: JS 用 dev.on('data') 异步模式，这里用独立线程 + blocking read。
 
-use std::io::{self, Write};
+use std::io::{self};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
     let api = hidapi::HidApi::new().map_err(|e| anyhow::anyhow!("HID: {}", e))?;
@@ -25,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     println!();
 
     let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+    let _r = running.clone();
 
     // Ctrl+C 处理
     let r2 = running.clone();

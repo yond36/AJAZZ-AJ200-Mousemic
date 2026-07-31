@@ -143,7 +143,8 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
             &cli.driver,
         );
         let mut bridge = Bridge::new(&cfg, &log)?;
-        bridge.run(&mut sink, &|| (0usize, 0usize), &stop, true, &log)?;
+        let noop_battery = |_: u8, _: bool| {};
+        bridge.run(&mut sink, &|| (0usize, 0usize), &stop, true, &log, &noop_battery)?;
     } else if let Some(path) = &cli.file {
         let mut wav = WavWriter::new(path, SAMPLE_RATE, 1)?;
         log(&format!("录音到: {}", path));
@@ -157,7 +158,8 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
         };
         let cfg = bridge_config("file", "CABLE Input", &cli.hotkey, &cli.driver);
         let mut bridge = Bridge::new(&cfg, &log)?;
-        let r = bridge.run(&mut sink, &|| (0usize, 0usize), &stop, true, &log);
+        let noop_battery = |_: u8, _: bool| {};
+        let r = bridge.run(&mut sink, &|| (0usize, 0usize), &stop, true, &log, &noop_battery);
         wav.close()?;
         log(&format!("已保存 {}", path));
         r?;

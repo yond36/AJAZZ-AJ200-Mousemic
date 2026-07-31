@@ -193,6 +193,7 @@ pub struct Connected {
     pub cmd: HidDevice,
     pub control: Option<HidDevice>,
     pub consumer: Option<HidDevice>,  // Consumer Control, 读 0x0C 按键事件
+    pub battery: Option<HidDevice>,   // 电池状态接口 (0xFFA0 usage=0x0002, 被动上报)
     pub path: String,
     pub pid: u16,
     pub product_string: String,
@@ -275,11 +276,19 @@ pub fn connect_audio(
                         && dd.usage_page() == 0x000c
                         && dd.usage() == 0x0001)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
+                // 电池状态接口: 0xFFA0 usage=0x0002, 鼠标被动上报 (参考 battery_monitor.js)
+                let battery = api.device_list()
+                    .filter(|dd| dd.vendor_id() == 0x363C
+                        && dd.product_id() == d.product_id
+                        && dd.usage_page() == 0xffa0
+                        && dd.usage() == 0x0002)
+                    .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
                 return Some(Connected {
                     audio,
                     cmd,
                     control,
                     consumer,
+                    battery,
                     path: d.path.clone(),
                     pid: d.product_id,
                     product_string: d.product_string.clone(),
@@ -305,6 +314,19 @@ pub fn live_link(api: &HidApi, wired_pids: &HashSet<u16>, wireless_pids: &HashSe
         }
     }
     None
+}
+
+/// 解析电池状态上报报告 [0x0A, 0x13, ...]:
+///   buf[17] = 充电标志 (1=充电中)
+///   buf[18] = 电量百分比
+///   buf[20] = 无线连接标志 (1=无线)
+/// 返回 (电量%, 是否充电中); 非电池报告返回 None。
+pub fn parse_battery(buf: &[u8]) -> Option<(u8, bool)> {
+    if buf.len() > 20 && buf[0] == 0x0A && buf[1] == 0x13 {
+        Some((buf[18].min(100), buf[17] == 1))
+    } else {
+        None
+    }
 }
 
 /// 打印所有 HID 设备, 重点标注 AJAZZ (VID=363C) 与音频 usage_page (0xFFAA)。
