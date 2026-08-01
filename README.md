@@ -11,8 +11,25 @@
 - **自动发送**：语音结束后延迟自动按 Enter 或 Ctrl+Enter
 - **AI 键管理**：启动时自动开启双键 AI，停止/退出时自动关闭
 - **热插拔自动切换**：有线/无线链路自动识别、断线重连
-- **系统托盘**：最小化到托盘，开机自启
+- **电池状态显示**：顶部实时显示电量百分比与充电状态（被动上报，不增加鼠标耗电）；电量 ≤10% 或充满时托盘气泡提醒
+- **设备识别（PID 白名单）**：仅识别 AJ200 系列已知 PID，检查依赖时显示识别到的鼠标型号、传感器、飞轮及 PID 信息
+- **系统托盘**：运行中关闭窗口最小化到托盘，停止状态关闭即退出；支持开机自启
+- **调试日志**：勾选后输出语音包/解码/AI 键配置等详细统计，日志框自动滚动到底部
 - **原生 GUI**：Win32 原生控件，内存 ~22MB
+
+## 支持设备
+
+AJ200 系列（仅列主要型号，完整列表见 `src/devices.rs`）：
+
+| 型号 | 传感器 | 飞轮 |
+|------|--------|------|
+| AJ200 NL AI MC | PAW3311 | ❌ |
+| AJ200 NL AI PRO+ | PAW3395 | ❌ |
+| AJ200P NL AI ULTRA | PAW3950 / PAW3955 | ❌ |
+| AJ200P NL AI ULTRA+ | PAW3950 | ✅ |
+| AJ200P NL AI ULTRA-3955 | PAW3955 | ✅ |
+| AJ200P AI MASTER | PAW3955 | ✅ |
+| AJ200P NL AI S ULTRA | PAW3955 | ✅ |
 
 ## 系统要求
 
@@ -39,10 +56,11 @@ cargo build --release
 
 - **语言**：Rust（原版 Python/tkinter，Rust 版内存更低、启动更快）
 - **音频解码**：mSBC（蓝牙低功耗音频编解码），基于 BlueZ sbc 库静态编译
-- **HID 通信**：hidapi，usage_page=0xFFAA
+- **HID 通信**：hidapi，音频接口 usage_page=0xFFAA；电池状态被动上报于 0xFFA0 usage=0x0002（`[0x0A,0x13,...]`，buf[17]=充电标志、buf[18]=电量%）
 - **音频输出**：cpal (WASAPI)，16kHz→48kHz 线性重采样
 - **热键注入**：SendInput 扫描码 / Interception 内核驱动（可选）
 - **GUI**：native-windows-gui（Win32 原生控件 + GDI 系统字体）
+- **托盘提醒**：Shell_NotifyIconW 气泡（NIF_INFO）
 
 ## License
 

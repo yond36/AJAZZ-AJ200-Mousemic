@@ -20,3 +20,6 @@ Thumbs.db
 
 # Config (contains local paths)
 mousemic_gui.json
+
+# Local release build output
+/release/
