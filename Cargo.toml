@@ -14,10 +14,6 @@ path = "src/lib.rs"
 name = "MouseMic"
 path = "src/main.rs"
 
-[[bin]]
-name = "KeyTest"
-path = "src/bin/key_test.rs"
-
 [features]
 default = ["gui"]
 # gui: 启用 native-windows-gui 原生 Win32 图形界面 + 系统托盘。
