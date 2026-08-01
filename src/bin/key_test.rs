@@ -48,39 +48,36 @@ fn main() -> anyhow::Result<()> {
         let running = running.clone();
 
         let handle = thread::spawn(move || {
-            match hidapi::HidApi::new() {
-                Ok(a) => {
-                    match a.open_path(&std::ffi::CString::new(path.as_bytes()).unwrap()) {
-                        Ok(dev) => {
-                            let mut buf = [0u8; 64];
-                            while running.load(Ordering::SeqCst) {
-                                match dev.read_timeout(&mut buf, 100) {
-                                    Ok(n) if n > 0 => {
-                                        if buf[0] != 0 {
-                                            let label = format!("up=0x{:04X} u=0x{:04X} pid=0x{:04X}", up, u, pid);
-                                            if buf[0] == 0x0C {
-                                                match buf[1] {
-                                                    0x08 => println!("[{}] ▼ 前进键按下", label),
-                                                    0x04 => println!("[{}] ▼ 后退键按下", label),
-                                                    0x00 => println!("[{}] ▲ 释放", label),
-                                                    _ => println!("[{}] 0x0C {:02X} {:02X}", label, buf[1], buf[2]),
-                                                }
-                                            } else {
-                                                print!("[{}] ", label);
-                                                for i in 0..n.min(8) { print!("{:02X} ", buf[i]); }
-                                                println!();
+            if let Ok(a) = hidapi::HidApi::new() {
+                match a.open_path(&std::ffi::CString::new(path.as_bytes()).unwrap()) {
+                    Ok(dev) => {
+                        let mut buf = [0u8; 64];
+                        while running.load(Ordering::SeqCst) {
+                            match dev.read_timeout(&mut buf, 100) {
+                                Ok(n) if n > 0 => {
+                                    if buf[0] != 0 {
+                                        let label = format!("up=0x{:04X} u=0x{:04X} pid=0x{:04X}", up, u, pid);
+                                        if buf[0] == 0x0C {
+                                            match buf[1] {
+                                                0x08 => println!("[{}] ▼ 前进键按下", label),
+                                                0x04 => println!("[{}] ▼ 后退键按下", label),
+                                                0x00 => println!("[{}] ▲ 释放", label),
+                                                _ => println!("[{}] 0x0C {:02X} {:02X}", label, buf[1], buf[2]),
                                             }
+                                        } else {
+                                            print!("[{}] ", label);
+                                            for &b in buf.iter().take(n.min(8)) { print!("{:02X} ", b); }
+                                            println!();
                                         }
                                     }
-                                    Err(_) => break,
-                                    _ => {}
                                 }
+                                Err(_) => break,
+                                _ => {}
                             }
                         }
-                        Err(e) => println!("无法打开 up=0x{:04X} u=0x{:04X}: {}", up, u, e),
                     }
+                    Err(e) => println!("无法打开 up=0x{:04X} u=0x{:04X}: {}", up, u, e),
                 }
-                Err(_) => {}
             }
         });
         handles.push((up, u, pid, handle));

@@ -25,6 +25,7 @@ struct LinearResampler {
     idx: u64,
     cur: f64,
     nxt: f64,
+    primed: bool,
 }
 
 impl LinearResampler {
@@ -36,6 +37,7 @@ impl LinearResampler {
             idx: 0,
             cur: 0.0,
             nxt: 0.0,
+            primed: false,
         }
     }
 
@@ -43,7 +45,12 @@ impl LinearResampler {
     /// `src` 在需要下一个输入样本时被调用, 返回 None 表示输入已枯竭 (补 0)。
     fn process(&mut self, out_frames: usize, src: &mut dyn FnMut() -> Option<f64>, out: &mut [f64]) {
         let step = self.in_rate / self.out_rate;
-        for i in 0..out_frames {
+        // 预热预读样本: 否则首个输出样本恒为 0 (nxt 从 0 开始), 造成起点毛刺。
+        if !self.primed {
+            self.nxt = src().unwrap_or(0.0);
+            self.primed = true;
+        }
+        for sample in out.iter_mut().take(out_frames) {
             self.pos += step;
             while self.pos >= (self.idx + 1) as f64 {
                 self.idx += 1;
@@ -51,7 +58,7 @@ impl LinearResampler {
                 self.nxt = src().unwrap_or(0.0);
             }
             let frac = self.pos - self.idx as f64;
-            out[i] = self.cur * (1.0 - frac) + self.nxt * frac;
+            *sample = self.cur * (1.0 - frac) + self.nxt * frac;
         }
     }
 }

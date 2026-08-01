@@ -544,10 +544,14 @@ impl GuiApp {
                 }
             }
             if let Some(r) = running_changed {
+                let was_running = self.state.borrow().running;
                 self.state.borrow_mut().running = r;
                 if !r {
                     self.state.borrow_mut().stop = None;
-                    self.append_log("桥接已停止。");
+                    // 主动停止时 stop_bridge 已打过日志; 这里只在后台线程自行退出时补一条
+                    if was_running {
+                        self.append_log("桥接已停止。");
+                    }
                 }
                 self.update_run_state_ui(r);
             }
@@ -644,10 +648,11 @@ impl GuiApp {
         // 按 PID 去重收集命中的支持设备 (任一接口命中即算)
         let mut seen: Vec<u16> = Vec::new();
         for d in api.device_list() {
-            if d.vendor_id() == crate::VID && crate::devices::is_supported(d.product_id()) {
-                if !seen.contains(&d.product_id()) {
-                    seen.push(d.product_id());
-                }
+            if d.vendor_id() == crate::VID
+                && crate::devices::is_supported(d.product_id())
+                && !seen.contains(&d.product_id())
+            {
+                seen.push(d.product_id());
             }
         }
         if seen.is_empty() {

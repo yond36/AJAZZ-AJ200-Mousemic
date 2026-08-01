@@ -308,12 +308,9 @@ pub fn connect_audio(
 
 /// 返回当前真实在线的音频链路 (基于激活握手确认); 都不在线返回 None。
 pub fn live_link(api: &HidApi, wired_pids: &HashSet<u16>, wireless_pids: &HashSet<u16>) -> Option<AjazzDevice> {
-    for d in priority_order(api, wired_pids, wireless_pids, None) {
-        if arm_mouse(api, Some(d.product_id)).is_some() {
-            return Some(d);
-        }
-    }
-    None
+    priority_order(api, wired_pids, wireless_pids, None)
+        .into_iter()
+        .find(|d| arm_mouse(api, Some(d.product_id)).is_some())
 }
 
 /// 解析电池状态上报报告 [0x0A, 0x13, ...]:
@@ -323,7 +320,12 @@ pub fn live_link(api: &HidApi, wired_pids: &HashSet<u16>, wireless_pids: &HashSe
 /// 返回 (电量%, 是否充电中); 非电池报告返回 None。
 pub fn parse_battery(buf: &[u8]) -> Option<(u8, bool)> {
     if buf.len() > 20 && buf[0] == 0x0A && buf[1] == 0x13 {
-        Some((buf[18].min(100), buf[17] == 1))
+        let pct = buf[18];
+        if pct <= 100 {
+            Some((pct, buf[17] == 1))
+        } else {
+            None // 255 = 未知电量, 不误报为 100%
+        }
     } else {
         None
     }
@@ -373,4 +375,35 @@ pub fn list_hid(log: &dyn Fn(&str)) {
     log("");
     log("提示: 音频接口需 usage_page=0xFFAA。若插线后看不到 AJAZZ 或没有该接口,");
     log("说明此鼠标有线的 USB 未暴露语音 HID (硬件限制), 只能无线用语音。");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn battery_parse_ok() {
+        let mut buf = [0u8; 64];
+        buf[0] = 0x0A;
+        buf[1] = 0x13;
+        buf[17] = 1; // 充电中
+        buf[18] = 80;
+        buf[20] = 1; // 无线
+        assert_eq!(parse_battery(&buf), Some((80, true)));
+    }
+
+    #[test]
+    fn battery_parse_rejects_unknown_value() {
+        let mut buf = [0u8; 64];
+        buf[0] = 0x0A;
+        buf[1] = 0x13;
+        buf[18] = 0xFF; // 255 = 未知电量, 不应误报为 100%
+        assert_eq!(parse_battery(&buf), None);
+    }
+
+    #[test]
+    fn battery_parse_non_report() {
+        assert_eq!(parse_battery(&[0u8; 64]), None);
+        assert_eq!(parse_battery(&[0x0A, 0x13]), None); // 长度不足
+    }
 }

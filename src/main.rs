@@ -87,7 +87,6 @@ fn main() {
     #[cfg(feature = "gui")]
     {
         mousemic_rs::gui::run(cli.autostart);
-        return;
     }
     #[cfg(not(feature = "gui"))]
     {
@@ -221,14 +220,16 @@ use std::fs::File;
 struct WavWriter {
     f: File,
     data_len: u32,
+    sample_rate: u32,
+    channels: u16,
 }
 
 impl WavWriter {
-    fn new(path: &str, _sample_rate: u32, _channels: u16) -> std::io::Result<Self> {
+    fn new(path: &str, sample_rate: u32, channels: u16) -> std::io::Result<Self> {
         let mut f = File::create(path)?;
         // 先写占位头 (data_len=0), 关闭时回填真实长度。
-        f.write_all(&wav_header(_sample_rate, _channels, 0))?;
-        Ok(WavWriter { f, data_len: 0 })
+        f.write_all(&wav_header(sample_rate, channels, 0))?;
+        Ok(WavWriter { f, data_len: 0, sample_rate, channels })
     }
 
     fn write_samples(&mut self, samples: &[i16]) -> std::io::Result<()> {
@@ -241,7 +242,7 @@ impl WavWriter {
 
     fn close(mut self) -> std::io::Result<()> {
         self.f.seek(SeekFrom::Start(0))?;
-        self.f.write_all(&wav_header(SAMPLE_RATE, 1, self.data_len))?;
+        self.f.write_all(&wav_header(self.sample_rate, self.channels, self.data_len))?;
         self.f.flush()
     }
 }

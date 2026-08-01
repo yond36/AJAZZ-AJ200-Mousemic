@@ -21,7 +21,7 @@ pub struct Config {
     pub hotkey_backward: Option<String>,
     /// 热键注入方式: "sendinput" | "interception"。
     pub driver: String,
-    /// 关闭窗口时最小化到托盘。
+    /// 启动时最小化到托盘 (配合 --autostart / 开机自启使用; 运行中关闭窗口始终收进托盘)。
     pub minimize_to_tray: bool,
     /// 启动 GUI 时自动启动桥接服务。
     pub auto_start_service: bool,
@@ -91,10 +91,12 @@ impl Config {
         list.iter()
             .filter_map(|v| {
                 let t = v.trim();
-                if let Ok(x) = u16::from_str_radix(t.trim_start_matches("0x").trim_start_matches("0X"), 16) {
-                    Some(x)
+                if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                    // 显式 0x 前缀 → 十六进制
+                    u16::from_str_radix(hex, 16).ok()
                 } else {
-                    t.parse::<u16>().ok()
+                    // 无前缀 → 先按十进制; 失败再兜底试十六进制 (兼容旧写法 "ED03")
+                    t.parse::<u16>().ok().or_else(|| u16::from_str_radix(t, 16).ok())
                 }
             })
             .collect()
@@ -105,7 +107,13 @@ impl Config {
 
     pub fn load() -> Config {
         let mut cfg = match std::fs::read_to_string(Self::config_path()) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| Config::default()),
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("配置解析失败 ({}), 已回退默认配置: {}", Self::config_path().display(), e);
+                    Config::default()
+                }
+            },
             Err(_) => Config::default(),
         };
         cfg.autostart = is_autostart_on();
@@ -134,7 +142,7 @@ mod registry {
             .or_else(|_| hkcu.create_subkey_with_flags(REG_KEY, KEY_SET_VALUE).map(|(k, _)| k))?;
         if enable {
             // 打包后直接跑 exe 自身; 开发模式用 pythonw 跑脚本由 GUI 决定, 这里统一用 exe 路径。
-            let exe = std::env::current_exe().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let exe = std::env::current_exe().map_err(std::io::Error::other)?;
             let val = format!("\"{}\" --autostart", exe.display());
             key.set_value(REG_NAME, &val)
         } else {
@@ -159,3 +167,24 @@ mod registry {
 }
 
 pub use registry::{is_autostart_on, set_autostart};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coerce_pids_formats() {
+        let set = Config::coerce_pids(&[
+            "0xED03".to_string(), // 显式十六进制
+            "57003".to_string(),  // 十进制
+            "1234".to_string(),   // 十进制 1234 (不应被当成 0x1234)
+            "ED03".to_string(),   // 无前缀十六进制 (兼容旧写法)
+            "垃圾".to_string(),   // 无效输入
+        ]);
+        assert!(set.contains(&0xED03));
+        assert!(set.contains(&57003));
+        assert!(set.contains(&1234));
+        assert!(!set.contains(&0x1234));
+        assert_eq!(set.len(), 3); // 0xED03 与 ED03 是同一个值, 去重后 3 个
+    }
+}
