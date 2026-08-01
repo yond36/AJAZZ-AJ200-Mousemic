@@ -227,12 +227,15 @@ pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
             send_ai_report(control, 0x18, 0x01, 0, 0, 0, 0)
         }
         (true, false) => {
-            // 仅前进=AI, 不动后退
-            send_ai_report(control, 0x10, 0x01, 0, 0, 0, 0)
+            // 仅前进=AI (mask=0x10); 后退未启用 AI, 必须保留默认短按/长按 (1,1),
+            // 否则固件会把后退键的短按功能也清掉 (参考 ai_key_control.js 的
+            // enableForwardOnly: sendCommand(0x10, 1, 0, 0, 1, 1))。
+            send_ai_report(control, 0x10, 0x01, 1, 1, 0, 0)
         }
         (false, true) => {
-            // 仅后退=AI, 不动前进
-            send_ai_report(control, 0x08, 0x01, 0, 0, 0, 0)
+            // 仅后退=AI (mask=0x08); 前进未启用 AI, 保留默认 (2,2)
+            // (参考 ai_key_control.js 的 enableBackwardOnly: sendCommand(0x08, 1, 2, 2, 0, 0))。
+            send_ai_report(control, 0x08, 0x01, 0, 0, 2, 2)
         }
     }
 }
