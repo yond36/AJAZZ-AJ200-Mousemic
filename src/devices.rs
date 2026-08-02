@@ -52,7 +52,7 @@ pub const SUPPORTED_DEVICES: &[DeviceInfo] = &[
     d(0xED26, "AJ200P NL AI S ULTRA", "PAW3955", true, ""),
 ];
 
-/// 支持的 PID 集合 (25 个唯一值)。
+/// 支持的 PID 集合 (21 个唯一值)。
 pub fn supported_pids() -> std::collections::HashSet<u16> {
     SUPPORTED_DEVICES.iter().map(|d| d.pid).collect()
 }

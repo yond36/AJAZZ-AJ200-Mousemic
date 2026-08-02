@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const PROBE_INTERVAL: f64 = 1.5;
+/// 每次 poll_consumer 最多排空的报告数 (防设备刷屏饿死主循环)。
+const CONSUMER_DRAIN_MAX: u32 = 64;
 
 pub struct Bridge {
     api: HidApi,
@@ -184,12 +186,22 @@ impl Bridge {
         let mut events: Vec<(u8, u8)> = Vec::new();
         if let Some(ref mut consumer) = self.consumer {
             let mut buf = [0u8; 64];
+            // 上限保护: 防止设备持续刷非 0x0C 报告时死循环饿死主循环 (音频读 200ms 超时)
+            let mut drained = 0u32;
             loop {
+                if drained >= CONSUMER_DRAIN_MAX {
+                    break;
+                }
+                drained += 1;
                 match consumer.read_timeout(&mut buf, 0) {
-                    Ok(n) if n > 0 && buf[0] == 0x0C => {
-                        events.push((buf[1], buf[2]));
+                    // 读到数据: 仅收集 0x0C 按键事件; 其他报告 ID 忽略但继续排空,
+                    // 避免一条无关报告把后续排队的按键事件卡在驱动缓冲里 (漏掉按下)。
+                    Ok(n) if n > 0 => {
+                        if buf[0] == 0x0C {
+                            events.push((buf[1], buf[2]));
+                        }
                     }
-                    _ => { break; }
+                    _ => { break; } // 无数据 (Ok(0)) 或错误: 结束本轮排空
                 }
             }
         }

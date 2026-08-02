@@ -77,6 +77,9 @@ struct AppState {
     // 启动后首次收进托盘
     pending_hide: bool,
 
+    // 是否由 --autostart (注册表开机自启) 启动: 该入口应直接起桥接
+    autostart_launch: bool,
+
     // 电池提醒状态 (防重复提醒)
     battery_low_notified: bool,
     battery_full_notified: bool,
@@ -108,6 +111,7 @@ impl Default for AppState {
             typeless_fwd: false,
             typeless_bwd: false,
             pending_hide: false,
+            autostart_launch: false,
             battery_low_notified: false,
             battery_full_notified: false,
         }
@@ -159,10 +163,10 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, text: "输出模式", position: (10, 24), size: (75, 22))]
     lbl_mode: nwg::Label,
     #[nwg_control(parent: settings_frame, text: "扬声器试听", position: (100, 24), size: (120, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_mode_change] )]
+    #[nwg_events( OnButtonClick: [GuiApp::on_mode_play] )]
     rb_play: nwg::RadioButton,
     #[nwg_control(parent: settings_frame, text: "虚拟麦克风", position: (225, 24), size: (120, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_mode_change] )]
+    #[nwg_events( OnButtonClick: [GuiApp::on_mode_cable] )]
     rb_cable: nwg::RadioButton,
     #[nwg_control(parent: settings_frame, text: "", position: (10, 50), size: (520, 40))]
     lbl_mode_hint: nwg::Label,
@@ -295,6 +299,7 @@ impl GuiApp {
         state.msg_tx = Some(tx);
         state.msg_rx = Some(rx);
 
+        state.autostart_launch = autostart;
         if autostart || state.minimize_to_tray {
             state.pending_hide = true;
         }
@@ -377,15 +382,17 @@ impl GuiApp {
         self.refresh_deps();
         self.timer.start();
 
-        // -autostart: 起桥接并收进托盘
-        let (auto_start, pending_hide) = {
+        // 收进托盘: --autostart 或勾选"启动最小化到托盘"
+        // 起桥接: 仅 --autostart 或勾选"自动起桥接"。两者独立, 收托盘不应隐含起桥接
+        // (旧代码里 minimize_to_tray 会错误地自动启动桥接)。
+        let (auto_start, autostart_launch, pending_hide) = {
             let st = self.state.borrow();
-            (st.auto_start_service, st.pending_hide)
+            (st.auto_start_service, st.autostart_launch, st.pending_hide)
         };
         if pending_hide {
             self.tray.set_visibility(true);
-            self.start_bridge();
-        } else if auto_start {
+        }
+        if autostart_launch || auto_start {
             self.start_bridge();
         }
     }
@@ -435,8 +442,15 @@ impl GuiApp {
 
     // ---------- 设置变更 ----------
 
-    fn on_mode_change(&self) {
-        let play = self.rb_play.check_state() == nwg::RadioButtonState::Checked;
+    fn on_mode_play(&self) { self.set_mode(true); }
+    fn on_mode_cable(&self) { self.set_mode(false); }
+
+    fn set_mode(&self, play: bool) {
+        // nwg RadioButton 未设 GROUP 标志, 不会自动互斥;
+        // 必须显式同步两个单选钮, 否则点击后旧按钮仍保持勾选, 且"虚拟麦克风"
+        // 永远无法生效 (旧代码只读 rb_play 状态)。
+        self.rb_play.set_check_state(if play { nwg::RadioButtonState::Checked } else { nwg::RadioButtonState::Unchecked });
+        self.rb_cable.set_check_state(if play { nwg::RadioButtonState::Unchecked } else { nwg::RadioButtonState::Checked });
         {
             let mut st = self.state.borrow_mut();
             st.mode_play = play;
