@@ -35,6 +35,10 @@ pub struct Bridge {
     hotkey_fwd_name: Option<String>,
     hotkey_bwd: Option<HotKey>,
     hotkey_bwd_name: Option<String>,
+    /// 前进键 AI 语音开关(独立于热键; 仅语音模式时 true, 不注入按键)。
+    ai_fwd: bool,
+    /// 后退键 AI 语音开关(独立于热键)。
+    ai_bwd: bool,
     n_pkts: u64,
     n_dec_ok: u64,
     n_dec_fail: u64,
@@ -84,6 +88,8 @@ impl Bridge {
             decoder: None,
             hotkey_fwd, hotkey_fwd_name,
             hotkey_bwd, hotkey_bwd_name,
+            ai_fwd: config.ai_fwd,
+            ai_bwd: config.ai_bwd,
             n_pkts: 0, n_dec_ok: 0, n_dec_fail: 0, fail_streak: 0,
             last_audio: 0.0, hotkey_engaged: false, hotkey_engaged_key: None, active_key: None,
             last_probe: 0.0, audio_started: false, start: Instant::now(),
@@ -147,18 +153,28 @@ impl Bridge {
     /// connect 后与链路探测后都要调用: 探测会重发 ARM 序列, 其最后一个包就是
     /// AI 键配置报告, 会把鼠标按键行为重置回默认 (双键全开), 覆盖用户在 GUI 里
     /// 设置的"某键=无"配置, 故每次探测成功后必须重新应用一次。
+    ///
+    /// 启用判定 = 绑定热键 **或** 独立 AI 开关(仅语音模式): 两者解耦, 允许
+    /// "长按触发麦克风但不注入任何按键"。未启用的键长按恢复默认浏览器前进/后退。
     fn apply_ai_config(&mut self, debug: bool, log: &dyn Fn(&str)) {
         if let Some(ref ctrl) = self.control {
-            let fwd = self.hotkey_fwd_name.is_some();
-            let bwd = self.hotkey_bwd_name.is_some();
+            let fwd = self.hotkey_fwd_name.is_some() || self.ai_fwd;
+            let bwd = self.hotkey_bwd_name.is_some() || self.ai_bwd;
             std::thread::sleep(Duration::from_millis(50));
             hid::set_ai_keys(ctrl, fwd, bwd);
             if debug {
-                let fh = self.hotkey_fwd_name.as_deref().unwrap_or("无");
-                let bh = self.hotkey_bwd_name.as_deref().unwrap_or("无");
-                log(&format!("AI键: 前进={}({}) 后退={}({})",
-                    if fwd { "启用" } else { "禁用" }, fh,
-                    if bwd { "启用" } else { "禁用" }, bh));
+                let fmt = |enabled: bool, name: &Option<String>| -> String {
+                    if !enabled {
+                        "禁用".to_string()
+                    } else if let Some(n) = name {
+                        format!("启用({})", n)
+                    } else {
+                        "启用(仅语音)".to_string()
+                    }
+                };
+                log(&format!("AI键: 前进={} 后退={}",
+                    fmt(fwd, &self.hotkey_fwd_name),
+                    fmt(bwd, &self.hotkey_bwd_name)));
             }
         } else if debug {
             log("未找到 control 接口 (usage_page=0xFFA0), AI键配置无法生效");

@@ -38,7 +38,8 @@ struct Cli {
     /// 录音到 WAV 文件 (按住语音键录音, Ctrl+C 结束)。
     #[arg(long, value_name = "WAV")]
     file: Option<String>,
-    /// 联动热键名 (按住语音键 = 按住该键)。可选值见 HOTKEY_NAMES。
+    /// 联动热键名 (按住语音键 = 按住该键, 同时作用于前进/后退键)。可选值见 HOTKEY_NAMES;
+    /// 不指定则两键为"仅语音"模式(长按触发麦克风, 不注入按键)。
     #[arg(long, value_name = "NAME")]
     hotkey: Option<String>,
     /// 热键注入方式: sendinput (默认) 或 interception。
@@ -131,6 +132,8 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
         ));
         if let Some(hk) = &cli.hotkey {
             log(&format!("联动热键: {} [{}]", hk, cli.driver));
+        } else {
+            log("前进/后退键: 仅语音模式(长按触发麦克风, 不注入按键)");
         }
         log("按住鼠标语音键开始说话, Ctrl+C 退出。");
         let stop = install_ctrl_c();
@@ -169,12 +172,17 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
 fn bridge_config(mode: &str, cable_device: &str, hotkey: &Option<String>, driver: &str) -> Config {
     let hotkey_forward = hotkey.clone();
     let hotkey_backward = hotkey.clone();
+    // 未指定 --hotkey → 两键"仅语音": 启用 AI 长按触发麦克风, 但不注入任何按键;
+    // 指定了 → 联动模式(绑定热键隐式启用 AI)。
+    let voice_only = hotkey.is_none();
     Config {
         mode: mode.to_string(),
         cable_device: cable_device.to_string(),
         hotkey_forward,
         hotkey_backward,
         driver: driver.to_string(),
+        ai_fwd: voice_only,
+        ai_bwd: voice_only,
         ..Config::default()
     }
 }

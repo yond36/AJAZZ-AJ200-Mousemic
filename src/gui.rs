@@ -29,6 +29,21 @@ use crate::config::{self, Config};
 use crate::dialog::show_error_box;
 use crate::{hid, single_instance, SAMPLE_RATE};
 
+/// 热键下拉框里的"仅语音"特殊项: 启用该键 AI(长按触发麦克风)但不注入任何按键。
+const VOICE_ONLY: &str = "仅语音(无热键)";
+
+/// 把热键下拉选中项拆成 (联动热键名, 仅语音开关):
+/// - "无" → 不联动且禁用 AI;
+/// - VOICE_ONLY → 不联动但启用 AI(仅语音);
+/// - 热键名 → 联动(绑定热键隐式启用 AI, ai 置 false 由 Config 判定兜底)。
+fn split_hotkey_sel(sel: &str) -> (Option<String>, bool) {
+    match sel {
+        "无" => (None, false),
+        VOICE_ONLY => (None, true),
+        other => (Some(other.to_string()), false),
+    }
+}
+
 /// 后台线程 → GUI 主线程的通道消息。
 enum Msg {
     Log(String),
@@ -276,8 +291,17 @@ impl GuiApp {
         let cfg = Config::load();
         state.mode_play = cfg.mode == "play";
         state.cable_device = cfg.cable_device.clone();
-        state.hotkey_fwd = cfg.hotkey_forward.clone().unwrap_or_else(|| "无".to_string());
-        state.hotkey_bwd = cfg.hotkey_backward.clone().unwrap_or_else(|| "无".to_string());
+        // 下拉选中项 = 绑定的热键名; 未绑定但开了仅语音 → "仅语音(无热键)"; 否则 "无"。
+        state.hotkey_fwd = match (&cfg.hotkey_forward, cfg.ai_fwd) {
+            (Some(h), _) => h.clone(),
+            (None, true) => VOICE_ONLY.to_string(),
+            (None, false) => "无".to_string(),
+        };
+        state.hotkey_bwd = match (&cfg.hotkey_backward, cfg.ai_bwd) {
+            (Some(h), _) => h.clone(),
+            (None, true) => VOICE_ONLY.to_string(),
+            (None, false) => "无".to_string(),
+        };
         state.driver = cfg.driver.clone();
         state.autostart_on = cfg.autostart;
         state.minimize_to_tray = cfg.minimize_to_tray;
@@ -288,8 +312,8 @@ impl GuiApp {
         state.typeless_fwd = cfg.typeless_fwd;
         state.typeless_bwd = cfg.typeless_bwd;
 
-        // 热键下拉框数据 (无 + HOTKEY_NAMES)
-        let mut hk = vec!["无".to_string()];
+        // 热键下拉框数据 (无 + 仅语音 + HOTKEY_NAMES)
+        let mut hk = vec!["无".to_string(), VOICE_ONLY.to_string()];
         hk.extend(crate::hotkey::HOTKEY_NAMES.iter().map(|s| s.to_string()));
         state.hotkey_items = hk;
         state.driver_items = vec!["sendinput".to_string(), "interception".to_string()];
@@ -307,6 +331,10 @@ impl GuiApp {
 
     /// build_ui 之后填充下拉框/复选框/模式提示, 并启动计时器/按需起桥接。
     fn post_build(&self) {
+        // 标题栏带上版本号 (nwg_control 属性是静态字面量, 这里运行时设置,
+        // 与 single_instance 查找用的 WINDOW_TITLE 同一来源, 不会失配)。
+        self.window.set_text(crate::WINDOW_TITLE);
+
         let st = self.state.borrow();
 
         // 填充下拉框
@@ -829,11 +857,15 @@ impl GuiApp {
             .cb_driver.selection()
             .and_then(|i| st.driver_items.get(i).cloned())
             .unwrap_or_else(|| "sendinput".to_string());
+        let (hotkey_forward, ai_fwd) = split_hotkey_sel(&hotkey_fwd);
+        let (hotkey_backward, ai_bwd) = split_hotkey_sel(&hotkey_bwd);
         Config {
             mode: if st.mode_play { "play".to_string() } else { "cable".to_string() },
             cable_device: self.cb_cable.selection_string().unwrap_or_else(|| st.cable_device.clone()),
-            hotkey_forward: if hotkey_fwd == "无" { None } else { Some(hotkey_fwd) },
-            hotkey_backward: if hotkey_bwd == "无" { None } else { Some(hotkey_bwd) },
+            hotkey_forward,
+            hotkey_backward,
+            ai_fwd,
+            ai_bwd,
             driver,
             minimize_to_tray: st.minimize_to_tray,
             auto_start_service: st.auto_start_service,
@@ -879,11 +911,19 @@ impl GuiApp {
             let mut st = self.state.borrow_mut();
             st.running = true;
             st.stop = Some(stop.clone());
+            // 键位描述: 绑了热键 → 热键名; 仅语音 → "仅语音"; 都没开 → "禁用"
+            let key_desc = |name: &Option<String>, ai: bool| -> String {
+                match (name, ai) {
+                    (Some(n), _) => n.clone(),
+                    (None, true) => "仅语音".to_string(),
+                    (None, false) => "禁用".to_string(),
+                }
+            };
             st.log_lines.push(format!(
                 "已启动: 模式={} 前进={} 后退={} 驱动={}",
                 cfg.mode,
-                cfg.hotkey_forward.as_deref().unwrap_or("无"),
-                cfg.hotkey_backward.as_deref().unwrap_or("无"),
+                key_desc(&cfg.hotkey_forward, cfg.ai_fwd),
+                key_desc(&cfg.hotkey_backward, cfg.ai_bwd),
                 cfg.driver
             ));
         }

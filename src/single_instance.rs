@@ -31,7 +31,8 @@ mod imp {
     /// 找到已有实例的窗口并置前。若找不到窗口 (如最小化到托盘) 则不做任何事。
     pub fn bring_existing_to_front() {
         let class: Vec<u16> = "NativeWindowsGuiWindow\0".encode_utf16().collect();
-        let title: Vec<u16> = "AJAZZ 语音鼠标桥接器\0".encode_utf16().collect();
+        // 标题必须与 GUI 标题栏一致 (含版本号), 否则 FindWindowW 精确匹配会失败。
+        let title: Vec<u16> = format!("{}\0", crate::WINDOW_TITLE).encode_utf16().collect();
         unsafe {
             let Ok(hwnd) = FindWindowW(PCWSTR(class.as_ptr()), PCWSTR(title.as_ptr())) else {
                 return;

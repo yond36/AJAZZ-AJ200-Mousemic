@@ -15,10 +15,17 @@ pub struct Config {
     pub mode: String,
     /// 虚拟声卡输入设备名, 如 "CABLE Input"。
     pub cable_device: String,
-    /// 前进键联动热键名; None或"无" = 不联动=禁用该键AI。
+    /// 前进键联动热键名; None或"无" = 不联动。绑定热键时该键 AI(语音)自动启用。
     pub hotkey_forward: Option<String>,
-    /// 后退键联动热键名; None或"无" = 不联动=禁用该键AI。
+    /// 后退键联动热键名; None或"无" = 不联动。绑定热键时该键 AI(语音)自动启用。
     pub hotkey_backward: Option<String>,
+    /// 前进键 AI 语音开关(独立于热键): true 时即使未绑定联动热键, 长按也触发语音
+    /// (纯麦克风, 不注入按键)。绑定热键时隐式启用, 无需置 true。
+    #[serde(default)]
+    pub ai_fwd: bool,
+    /// 后退键 AI 语音开关(独立于热键), 语义同 ai_fwd。
+    #[serde(default)]
+    pub ai_bwd: bool,
     /// 热键注入方式: "sendinput" | "interception"。
     pub driver: String,
     /// 启动时最小化到托盘 (配合 --autostart / 开机自启使用; 运行中关闭窗口始终收进托盘)。
@@ -58,6 +65,10 @@ impl Default for Config {
             cable_device: default_cable(),
             hotkey_forward: Some("R_alt".to_string()),
             hotkey_backward: None,
+            // 默认关闭: 旧配置无此字段 → 保持旧行为(仅绑了热键的键启用语音)。
+            // 勾选 GUI 的"仅语音(无热键)"或 CLI 不带 --hotkey 时置 true。
+            ai_fwd: false,
+            ai_bwd: false,
             driver: default_driver(),
             minimize_to_tray: false,
             auto_start_service: false,
@@ -104,6 +115,21 @@ impl Config {
 
     pub fn wired_pids(&self) -> std::collections::HashSet<u16> { Self::coerce_pids(&self.wired_pids) }
     pub fn wireless_pids(&self) -> std::collections::HashSet<u16> { Self::coerce_pids(&self.wireless_pids) }
+
+    /// 热键名是否"真实绑定"(None 或字面量 "无" 都视为未绑定)。
+    fn hotkey_bound(name: &Option<String>) -> bool {
+        matches!(name.as_deref(), Some(n) if n != "无")
+    }
+
+    /// 前进键 AI(语音)是否启用: 绑定了联动热键, 或独立开关 ai_fwd 开启(仅语音模式)。
+    pub fn ai_forward_enabled(&self) -> bool {
+        Self::hotkey_bound(&self.hotkey_forward) || self.ai_fwd
+    }
+
+    /// 后退键 AI(语音)是否启用: 绑定了联动热键, 或独立开关 ai_bwd 开启(仅语音模式)。
+    pub fn ai_backward_enabled(&self) -> bool {
+        Self::hotkey_bound(&self.hotkey_backward) || self.ai_bwd
+    }
 
     pub fn load() -> Config {
         let mut cfg = match std::fs::read_to_string(Self::config_path()) {
@@ -171,6 +197,24 @@ pub use registry::{is_autostart_on, set_autostart};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_enabled_decisions() {
+        let mut c = Config::default();
+        // 默认: 前进绑了 R_alt → 隐式启用; 后退没绑 → 禁用
+        assert!(c.ai_forward_enabled());
+        assert!(!c.ai_backward_enabled());
+        // 后退开"仅语音" → 不绑热键也启用
+        c.ai_bwd = true;
+        assert!(c.ai_backward_enabled());
+        // 旧式字面量 "无" 视为未绑定
+        c.hotkey_forward = Some("无".to_string());
+        c.ai_fwd = false;
+        assert!(!c.ai_forward_enabled());
+        c.hotkey_backward = Some("无".to_string());
+        c.ai_bwd = false; // 复位之前设的仅语音开关
+        assert!(!c.ai_backward_enabled());
+    }
 
     #[test]
     fn coerce_pids_formats() {

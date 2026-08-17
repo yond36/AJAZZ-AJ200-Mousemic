@@ -32,6 +32,8 @@ pub mod gui;
 
 /// 鼠标厂商/音频常量 (与 Python 版保持一致)。
 pub const VID: u16 = 0x363C;
+/// 主窗口标题 (含版本号; GUI 标题栏与单实例窗口查找共用同一来源)。
+pub const WINDOW_TITLE: &str = concat!("AJAZZ 语音鼠标桥接器 v", env!("CARGO_PKG_VERSION"));
 /// 音频输入接口 usage_page (Col07)。
 pub const AUDIO_USAGE_PAGE: u16 = 0xFFAA;
 /// 命令通道 usage_page 候选 (同系列不同 PID 鼠标可能不同)。

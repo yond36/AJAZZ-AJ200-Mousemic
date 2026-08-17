@@ -1,6 +1,6 @@
 [package]
 name = "mousemic-rs"
-version = "1.4.3"
+version = "1.4.4"
 edition = "2021"
 description = "AJAZZ 语音鼠标 (VID=363C) 桥接为普通麦克风 — Rust 重写版"
 license = "MIT"
