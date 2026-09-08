@@ -12,7 +12,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const PROBE_INTERVAL: f64 = 1.5;
+// 轻量探测间隔: 纯本机枚举、不写固件, 故可放宽到 3s, 进一步降低 USB 枚举开销。
+// 历史值 1.5s + 每次全量 ARM 握手 (8 包, 最坏 2.5s) 是光标偶发卡 1~2s 的根因。
+const PROBE_INTERVAL: f64 = 3.0;
+// 空闲电量刷新间隔: 这款固件只在收到命令流量后才上报电池, 平时零写入就永远
+// 收不到。空闲时做一次完整重握手 (与老版本每 1.5s 一次相同动作) 即可逗出上报,
+// 频率降到 5 分钟一次后, 顿感几乎不可察, 且永远避开语音期间。
+const IDLE_ARM_INTERVAL: f64 = 300.0;
+// 判定"空闲"的语音静默时长: 超过它才允许空闲重握手。
+const IDLE_SILENCE: f64 = 60.0;
 /// 每次 poll_consumer 最多排空的报告数 (防设备刷屏饿死主循环)。
 const CONSUMER_DRAIN_MAX: u32 = 64;
 
@@ -57,6 +65,12 @@ pub struct Bridge {
     auto_enter_sent: bool,
     typeless_fwd: bool,
     typeless_bwd: bool,
+    /// 本轮语音是否来过包 (用于会话结束时补发一次 AI 配置, 见 run 末尾)。
+    session_open: bool,
+    /// 上次空闲重握手时间 (秒, start 基准), 防止空闲刷新连击。
+    last_idle_arm: f64,
+    /// 连接成功后补一次电量刷新 (连接时那次握手拿不到上报, 隔 10s 再做一次)。
+    need_post_connect_refresh: bool,
 }
 
 impl Bridge {
@@ -99,6 +113,9 @@ impl Bridge {
             voice_ended_at: None, auto_enter_sent: false,
             typeless_fwd: config.typeless_fwd,
             typeless_bwd: config.typeless_bwd,
+            session_open: false,
+            last_idle_arm: 0.0,
+            need_post_connect_refresh: false,
         })
     }
 
@@ -108,6 +125,8 @@ impl Bridge {
         self.hotkey_engaged = false;
         self.hotkey_engaged_key = None;
         self.active_key = None;
+        self.session_open = false;
+        self.need_post_connect_refresh = false;
         if let Some(ref ctrl) = self.control {
             // 发送禁用 AI 键命令, 恢复前进/后退默认行为
             std::thread::sleep(Duration::from_millis(20));
@@ -126,6 +145,61 @@ impl Bridge {
         self.current_ps.clear();
     }
 
+    /// 用全新 HidApi 实例替换当前枚举。拔线后 refresh_devices 可能残留 stale 条目
+    /// (表现为握手"成功"但再也收不到包), 全新枚举比 refresh 更可靠。
+    /// 失败则保留旧实例并返回 false。
+    fn reenumerate(&mut self, log: &dyn Fn(&str)) -> bool {
+        match HidApi::new() {
+            Ok(api) => { self.api = api; true }
+            Err(e) => { log(&format!("HID 重新枚举失败: {}", e)); false }
+        }
+    }
+
+    /// 重连入口: 先等设备就绪, 就绪后只握手一次。
+    ///
+    /// 插拔线后 USB 重枚举需要时间, 无线射频重入网还要再滞后几秒。在此期间
+    /// 向半就绪设备发 ARM 曾把鼠标打挂到光标完全不动, 向未上线的射频发握手
+    /// 则会假成功 (日志正常但永远无声)。所以: 在此函数里只做纯枚举等待
+    /// (零写固件), 等最优链路连续两次 stable (间隔 1s) 且无线目标额外多等 2s
+    /// 射频, 然后一次 connect。失败就退回等下个周期, 绝不连击。
+    fn reconnect(&mut self, exclude_path: Option<&str>, debug: bool, log: &dyn Fn(&str)) -> bool {
+        log("链路变化, 等待设备就绪 (期间不读写设备)...");
+        let mut last_best: Option<String> = None;
+        let mut stable_count = 0;
+        for _ in 0..6 {
+            self.reenumerate(log);
+            let best = hid::priority_order(&self.api, &self.wired, &self.wireless, exclude_path)
+                .into_iter()
+                .next();
+            match best {
+                Some(d) if Some(d.path.clone()) == last_best => {
+                    stable_count += 1;
+                    if stable_count >= 2 {
+                        break;
+                    }
+                }
+                Some(d) => {
+                    last_best = Some(d.path);
+                    stable_count = 0;
+                }
+                None => {
+                    last_best = None;
+                    stable_count = 0;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+        // 稳定后若目标是无线, 射频可能还差一截, 再多等 2s。
+        if let Some(cand) = hid::best_light_link(&self.api, &self.wired, &self.wireless) {
+            if hid::classify_link(&cand.product_string, &self.wired, &self.wireless, cand.product_id) == "wireless" {
+                log("等待无线射频重入网 2 秒...");
+                std::thread::sleep(Duration::from_millis(2000));
+                self.reenumerate(log);
+            }
+        }
+        self.connect(exclude_path, debug, log)
+    }
+
     fn connect(&mut self, exclude_path: Option<&str>, debug: bool, log: &dyn Fn(&str)) -> bool {
         self.disconnect();
         let connected = hid::connect_audio(&self.api, &self.wired, &self.wireless, exclude_path, log);
@@ -142,6 +216,10 @@ impl Bridge {
 
         // 按配置决定哪些键启用 AI
         self.apply_ai_config(debug, log);
+        // 刚连上不计入空闲刷新, 从此刻起 5 分钟后才允许第一次;
+        // 但先安排一次启动补刷新 (10s 后, 拿首份电量)。
+        self.last_idle_arm = self.start.elapsed().as_secs_f64();
+        self.need_post_connect_refresh = true;
 
         match MsbcDecoder::new() {
             Ok(d) => { self.decoder = Some(d); true }
@@ -150,9 +228,8 @@ impl Bridge {
     }
 
     /// 按当前配置向鼠标写入 AI 键设置 (前进/后退分别启用或禁用)。
-    /// connect 后与链路探测后都要调用: 探测会重发 ARM 序列, 其最后一个包就是
-    /// AI 键配置报告, 会把鼠标按键行为重置回默认 (双键全开), 覆盖用户在 GUI 里
-    /// 设置的"某键=无"配置, 故每次探测成功后必须重新应用一次。
+    /// 仅 connect 后调用一次。周期探测已改为纯枚举零写入, 不再重发 ARM,
+    /// 故不需要每次探测后重应用 (旧逻辑每 1.5s 写一次固件, 是光标卡死的根因)。
     ///
     /// 启用判定 = 绑定热键 **或** 独立 AI 开关(仅语音模式): 两者解耦, 允许
     /// "长按触发麦克风但不注入任何按键"。未启用的键长按恢复默认浏览器前进/后退。
@@ -263,6 +340,7 @@ impl Bridge {
         log(&format!("已连接 ({}模式), 等待语音键...", self.mode_label()));
 
         let mut last_count_log = 0.0f64;
+        let mut last_bat_dbg_log = 0.0f64;
         let mut last_cb_total: usize = 0;
         let mut buf = [0u8; 64];
 
@@ -273,42 +351,79 @@ impl Bridge {
             // ---- 读取按键事件 (非阻塞, 先于音频读取, 避免长语音期间事件堆积) ----
             self.poll_consumer();
 
-            // ---- 周期性探测链路 ----
+            // ---- 周期性探测链路 (轻量: 只枚举, 零写入) ----
+            // 之前这里调 hid::live_link() 做全量 ARM 握手 (8 包 × (20ms + 最长 300ms)),
+            // 最坏阻塞 2.5s 且让鼠标固件忙到光标卡 1~2s。现改为纯枚举:
+            // 路径还在 = 在线, 什么都不做 (不重握手、不重发 AI 配置);
+            // 路径消失 / 出现更高优先级链路才重连 (重连那一次才写固件)。
+            // 固件假死(枚举在但不出声)由下方音频 read 错误分支覆盖重连。
             if now - self.last_probe >= PROBE_INTERVAL {
                 self.last_probe = now;
-                // 语音进行中跳过重握手: 音频流本身证明链路在线, 且 ARM 序列
-                // (8 个包 × 20ms 延时) 会打断语音; 中途断开会走下方音频读错误分支。
                 let speech_active = now - self.last_audio < crate::HOTKEY_IDLE_TIMEOUT;
                 if !speech_active {
                     if let Err(e) = self.api.refresh_devices() {
                         log(&format!("HID 枚举刷新失败: {}", e));
                     }
-                    match hid::live_link(&self.api, &self.wired, &self.wireless) {
+                    match hid::best_light_link(&self.api, &self.wired, &self.wireless) {
                         None => {
                             if self.current_path.is_some() { log("鼠标已断开, 等待重新连接..."); }
-                            if !self.connect(None, debug, log) {
-                                std::thread::sleep(Duration::from_millis(500));
+                            if !self.reconnect(None, debug, log) {
                                 continue;
                             }
                             log(&format!("已重新连接 ({}模式)。", self.mode_label()));
                         }
                         Some(live) => {
                             if self.current_path.as_deref() != Some(&live.path) {
-                                log(&format!("检测到链路变化, 切换到{}模式...", hid::classify_label(hid::classify_link(&live.product_string, &self.wired, &self.wireless, live.product_id))));
-                                if self.connect(None, debug, log) {
+                                let old_desc = format!("PID={:04X} {}", self.current_pid, self.current_ps);
+                                log(&format!("检测到链路变化, 切换到{}模式... (原:{} 新:PID={:04X} {})",
+                                    hid::classify_label(hid::classify_link(&live.product_string, &self.wired, &self.wireless, live.product_id)),
+                                    old_desc, live.product_id, live.product_string));
+                                if self.reconnect(None, debug, log) {
                                     log(&format!("已切换至{}模式。", self.mode_label()));
                                 } else {
-                                    log("切换失败, 继续重试...");
-                                    std::thread::sleep(Duration::from_millis(300));
+                                    log("切换失败, 下次探测继续重试...");
                                 }
                                 continue;
                             }
-                            // 链路未变, 但探测刚重发过 ARM 序列 (含 AI 键配置包),
-                            // 鼠标按键行为已被重置为默认, 这里按配置重新应用一次。
-                            self.apply_ai_config(debug, log);
+                            // 链路未变: 刻意什么都不做。旧代码在这里重发 ARM + 重发
+                            // AI 配置, 正是光标周期性卡死的来源。
                         }
                     }
                 }
+            }
+
+            // ---- 启动/切换后补一次电量刷新: 连接时那次握手拿不到上报,
+            // 相隔 10s (给句柄/射频留余量) 再做一次同动作; 语音中则顺延到松手后。
+            // 做完即清标志, 且顺手把 last_idle_arm 续上 (下一次就是 5 分钟后)。
+            if self.need_post_connect_refresh
+                && self.current_path.is_some()
+                && now - self.last_audio >= crate::HOTKEY_IDLE_TIMEOUT
+                && now - self.last_idle_arm >= 10.0
+            {
+                self.need_post_connect_refresh = false;
+                self.last_idle_arm = now;
+                if debug { log("获取启动电量: 重握手一次..."); }
+                if hid::arm_mouse(&self.api, Some(self.current_pid)).is_none() && debug {
+                    log("启动电量刷新: 握手无应答, 等空闲刷新再试");
+                }
+                self.apply_ai_config(debug, log);
+            }
+
+            // ---- 空闲电量刷新: 静默超 60s 且距上次超 5 分钟, 做一次完整重握手 ----
+            // 与老版本每 1.5s 的动作相同, 只是频率降到可忽略; 语音进行中
+            // (last_audio 在超时内) 绝不执行, 刚切换链路 5 分钟内也不会执行
+            // (last_idle_arm 在 connect 成功时重置)。临时句柄握手、用完即丢,
+            // 已持有的 audio/cmd 句柄不受影响。
+            if self.current_path.is_some()
+                && now - self.last_audio >= IDLE_SILENCE
+                && now - self.last_idle_arm >= IDLE_ARM_INTERVAL
+            {
+                self.last_idle_arm = now;
+                if debug { log("空闲刷新: 重握手一次以获取电量上报..."); }
+                if hid::arm_mouse(&self.api, Some(self.current_pid)).is_none() && debug {
+                    log("空闲刷新: 握手无应答, 下次再试");
+                }
+                self.apply_ai_config(debug, log);
             }
 
             // ---- 读取音频包 (优先) ----
@@ -353,6 +468,7 @@ impl Bridge {
                     }
                     self.n_pkts += 1;
                     self.last_audio = self.start.elapsed().as_secs_f64();
+                    self.session_open = true;
                     self.auto_enter_sent = false;
                     self.voice_ended_at = None;
 
@@ -397,10 +513,9 @@ impl Bridge {
                 Ok(_) => {}
                 Err(_) => {
                     log("鼠标连接中断, 尝试重新连接...");
-                    let _ = self.api.refresh_devices();
                     let ex = self.current_path.clone();
-                    if !self.connect(ex.as_deref(), debug, log) {
-                        std::thread::sleep(Duration::from_millis(500));
+                    if !self.reconnect(ex.as_deref(), debug, log) {
+                        log("重连暂未成功, 等待下次探测/读取重试...");
                     } else {
                         log(&format!("已重新连接 ({}模式)。", self.mode_label()));
                     }
@@ -434,11 +549,26 @@ impl Bridge {
                                 if changed {
                                     battery_cb(pct, charging);
                                 }
+                            } else if debug && t - last_bat_dbg_log >= 5.0 {
+                                // 调试用: 包到了但解析失败 (格式/阈值对不上), 打印前 24 字节,
+                                // 5 秒节流, 只读不写, 不影响鼠标。
+                                last_bat_dbg_log = t;
+                                let preview: Vec<String> = bbuf[..n.min(24)].iter().map(|b| format!("{:02X}", b)).collect();
+                                log(&format!("电池包解析失败 (len={}): {}", n, preview.join(" ")));
                             }
                         }
                         _ => break,
                     }
                 }
+            }
+
+            // ---- 会话结束: 补发一次 AI 键配置 (单包, 非调试不打日志) ----
+            // 两个作用: ① 若固件不知何故丢了 AI 配置, 这里自愈;
+            // ② 这款固件只在收到命令流量后才上报电池, 这一个单包大概率能把电量
+            // 包"逗"出来, 且频率仅为"每次语音一次", 远够不上卡鼠标的量级。
+            if self.session_open && self.start.elapsed().as_secs_f64() - self.last_audio > crate::HOTKEY_IDLE_TIMEOUT {
+                self.session_open = false;
+                self.apply_ai_config(debug, log);
             }
 
             // ---- 热键松开 (音频停止后) ----

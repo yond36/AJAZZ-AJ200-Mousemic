@@ -90,7 +90,8 @@ pub fn enumerate_audio(api: &HidApi) -> Vec<AjazzDevice> {
 }
 
 /// 按 有线 > 无线 > 未知 排序的候选音频链路。
-fn priority_order(
+/// 纯本机 USB 枚举, 不向固件写任何数据, 可在主循环高频调用而不卡鼠标。
+pub fn priority_order(
     api: &HidApi,
     wired_pids: &HashSet<u16>,
     wireless_pids: &HashSet<u16>,
@@ -171,7 +172,11 @@ pub fn arm_mouse(api: &HidApi, audio_pid: Option<u16>) -> Option<HidDevice> {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
-            // 读 0x0A 应答; 读超时/失败视为握手不通过
+            // 读 0x0A 应答; 只有硬错误才视为握手不通过。
+            // 注意: 必须保持宽松 (Ok(0) 超时也接受)。曾试过要求 n>0 来拦截拔线残留
+            // 句柄, 结果固件并非每包都按时应答, 导致重连循环连续轰炸 ARM 序列、
+            // 直接把鼠标打到光标完全不动。两害取其轻: 宁可连上后收不到包
+            // (由读取分支触发重连), 也绝不连续写固件。
             let mut rbuf = [0u8; 64];
             match dev.read_timeout(&mut rbuf, 300) {
                 Ok(_) => {}
@@ -260,7 +265,7 @@ pub fn connect_audio(
         let cmd = match arm_mouse(api, Some(d.product_id)) {
             Some(c) => c,
             None => {
-                tried.push(format!("PID={:04X} ({}) 命令通道握手失败", d.product_id, d.product_string));
+                tried.push(format!("PID={:04X} ({}) 命令通道握手失败(无应答, 可能为拔线残留句柄)", d.product_id, d.product_string));
                 continue;
             }
         };
@@ -271,19 +276,30 @@ pub fn connect_audio(
                         && dd.product_id() == d.product_id
                         && dd.usage_page() == 0xffa0)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
+                if control.is_none() {
+                    log("警告: control 接口 (0xFFA0) 打开失败, AI 键配置无法生效");
+                }
                 let consumer = api.device_list()
                     .filter(|dd| dd.vendor_id() == 0x363C
                         && dd.product_id() == d.product_id
                         && dd.usage_page() == 0x000c
                         && dd.usage() == 0x0001)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
+                if consumer.is_none() {
+                    log("警告: Consumer Control 接口 (0x0C) 打开失败, 语音键按下事件可能收不到");
+                }
                 // 电池状态接口: 0xFFA0 usage=0x0002, 鼠标被动上报 (参考 battery_monitor.js)
+                // 注意: 部分链路 (如有线) 可能不暴露该接口, 此时电量显示为 "--", 属正常。
                 let battery = api.device_list()
                     .filter(|dd| dd.vendor_id() == 0x363C
                         && dd.product_id() == d.product_id
                         && dd.usage_page() == 0xffa0
                         && dd.usage() == 0x0002)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
+                if battery.is_none() {
+                    log("提示: 未找到电池状态接口 (0xFFA0/0x0002), 本链路不显示电量");
+                }
+                log(&format!("已选定音频链路: PID={:04X} {} 路径={}", d.product_id, d.product_string, d.path));
                 return Some(Connected {
                     audio,
                     cmd,
@@ -308,10 +324,23 @@ pub fn connect_audio(
 }
 
 /// 返回当前真实在线的音频链路 (基于激活握手确认); 都不在线返回 None。
+/// 注意: 会向固件写 8 包 ARM 序列 (每包 20ms + 最长 300ms 应答等待),
+/// 最坏阻塞 2.5s 并可能让鼠标固件忙到光标卡死, 禁止在主循环周期探测里调用。
+/// 周期探测请用 `best_light_link` (纯枚举, 零写入); 本函数仅保留给排错/兼容。
 pub fn live_link(api: &HidApi, wired_pids: &HashSet<u16>, wireless_pids: &HashSet<u16>) -> Option<AjazzDevice> {
     priority_order(api, wired_pids, wireless_pids, None)
         .into_iter()
         .find(|d| arm_mouse(api, Some(d.product_id)).is_some())
+}
+
+/// 轻量最优链路: 纯本机枚举, 不写固件、不阻塞, 供主循环周期探测用。
+/// 真正的掉线(固件假死)由音频 read 错误分支覆盖, 那里才会重连并重握手。
+pub fn best_light_link(
+    api: &HidApi,
+    wired_pids: &HashSet<u16>,
+    wireless_pids: &HashSet<u16>,
+) -> Option<AjazzDevice> {
+    priority_order(api, wired_pids, wireless_pids, None).into_iter().next()
 }
 
 /// 解析电池状态上报报告 [0x0A, 0x13, ...]:
