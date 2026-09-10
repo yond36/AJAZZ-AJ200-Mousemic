@@ -157,6 +157,30 @@ pub fn find_command_paths(api: &HidApi, audio_pid: Option<u16>) -> Vec<String> {
     paths
 }
 
+/// 在已打开的命令通道设备上发送完整激活序列 (ARM_SEQ)。
+/// 返回是否全部发完且无硬错误。超时 (Ok(0)) 视为可接受——见 arm_mouse 注释。
+///
+/// 单独抽出便于复用已有长生命周期句柄 (如 Bridge::cmd), 避免每次重新 open/close。
+pub fn arm_existing(dev: &HidDevice) -> bool {
+    for p in &build_arm_seq() {
+        if dev.write(p).unwrap_or(0) != 64 {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // 读 0x0A 应答; 只有硬错误才视为握手不通过。
+        // 注意: 必须保持宽松 (Ok(0) 超时也接受)。曾试过要求 n>0 来拦截拔线残留
+        // 句柄, 结果固件并非每包都按时应答, 导致重连循环连续轰炸 ARM 序列、
+        // 直接把鼠标打到光标完全不动。两害取其轻: 宁可连上后收不到包
+        // (由读取分支触发重连), 也绝不连续写固件。
+        let mut rbuf = [0u8; 64];
+        match dev.read_timeout(&mut rbuf, 300) {
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// 打开命令通道并发送激活序列。握手成功返回保持打开的设备 (需存活整个运行期); 失败返回 None。
 pub fn arm_mouse(api: &HidApi, audio_pid: Option<u16>) -> Option<HidDevice> {
     for path in find_command_paths(api, audio_pid) {
@@ -164,29 +188,7 @@ pub fn arm_mouse(api: &HidApi, audio_pid: Option<u16>) -> Option<HidDevice> {
             Some(d) => d,
             None => continue,
         };
-        let seq = build_arm_seq();
-        let mut ok = true;
-        for p in &seq {
-            if dev.write(p).unwrap_or(0) != 64 {
-                ok = false;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            // 读 0x0A 应答; 只有硬错误才视为握手不通过。
-            // 注意: 必须保持宽松 (Ok(0) 超时也接受)。曾试过要求 n>0 来拦截拔线残留
-            // 句柄, 结果固件并非每包都按时应答, 导致重连循环连续轰炸 ARM 序列、
-            // 直接把鼠标打到光标完全不动。两害取其轻: 宁可连上后收不到包
-            // (由读取分支触发重连), 也绝不连续写固件。
-            let mut rbuf = [0u8; 64];
-            match dev.read_timeout(&mut rbuf, 300) {
-                Ok(_) => {}
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok {
+        if arm_existing(&dev) {
             return Some(dev);
         }
     }
@@ -253,6 +255,7 @@ pub fn connect_audio(
     wired_pids: &HashSet<u16>,
     wireless_pids: &HashSet<u16>,
     exclude_path: Option<&str>,
+    debug: bool,
     log: &dyn Fn(&str),
 ) -> Option<Connected> {
     let candidates = priority_order(api, wired_pids, wireless_pids, exclude_path);
@@ -276,7 +279,7 @@ pub fn connect_audio(
                         && dd.product_id() == d.product_id
                         && dd.usage_page() == 0xffa0)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
-                if control.is_none() {
+                if control.is_none() && debug {
                     log("警告: control 接口 (0xFFA0) 打开失败, AI 键配置无法生效");
                 }
                 let consumer = api.device_list()
@@ -285,7 +288,7 @@ pub fn connect_audio(
                         && dd.usage_page() == 0x000c
                         && dd.usage() == 0x0001)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
-                if consumer.is_none() {
+                if consumer.is_none() && debug {
                     log("警告: Consumer Control 接口 (0x0C) 打开失败, 语音键按下事件可能收不到");
                 }
                 // 电池状态接口: 0xFFA0 usage=0x0002, 鼠标被动上报 (参考 battery_monitor.js)
@@ -296,10 +299,12 @@ pub fn connect_audio(
                         && dd.usage_page() == 0xffa0
                         && dd.usage() == 0x0002)
                     .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
-                if battery.is_none() {
-                    log("提示: 未找到电池状态接口 (0xFFA0/0x0002), 本链路不显示电量");
+                if debug {
+                    if battery.is_none() {
+                        log("提示: 未找到电池状态接口 (0xFFA0/0x0002), 本链路不显示电量");
+                    }
+                    log(&format!("已选定音频链路: PID={:04X} {} 路径={}", d.product_id, d.product_string, d.path));
                 }
-                log(&format!("已选定音频链路: PID={:04X} {} 路径={}", d.product_id, d.product_string, d.path));
                 return Some(Connected {
                     audio,
                     cmd,

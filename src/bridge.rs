@@ -29,6 +29,9 @@ pub struct Bridge {
     wired: HashSet<u16>,
     wireless: HashSet<u16>,
     audio: Option<HidDevice>,
+    /// 命令通道句柄 (连接时握手成功、保持打开整个连接期)。
+    /// 语音包/空闲刷新都复用它, 不再每次开关临时句柄——临时句柄用完即关,
+    /// 反复开关会给固件额外压力 (且 useless: 关掉的句柄没有任何作用)。
     cmd: Option<HidDevice>,
     control: Option<HidDevice>,
     consumer: Option<HidDevice>,
@@ -127,10 +130,14 @@ impl Bridge {
         self.active_key = None;
         self.session_open = false;
         self.need_post_connect_refresh = false;
-        if let Some(ref ctrl) = self.control {
-            // 发送禁用 AI 键命令, 恢复前进/后退默认行为
-            std::thread::sleep(Duration::from_millis(20));
-            hid::ai_off(ctrl);
+        // 仅在确有关联设备 (已知链路) 时才发禁用命令: current_path 为空说明本就
+        // 未连接或已清空, 此时写固件是对 stale/无效句柄的无效操作, 跳过。
+        if self.current_path.is_some() {
+            if let Some(ref ctrl) = self.control {
+                // 发送禁用 AI 键命令, 恢复前进/后退默认行为
+                std::thread::sleep(Duration::from_millis(20));
+                hid::ai_off(ctrl);
+            }
         }
         self.decoder = None;
         drop(self.audio.take());
@@ -189,11 +196,20 @@ impl Bridge {
             }
             std::thread::sleep(Duration::from_millis(1000));
         }
-        // 稳定后若目标是无线, 射频可能还差一截, 再多等 2s。
+        // 稳定后按链路类型再给一段 settle: 枚举到 ≠ 设备就绪。
+        // - 无线: 射频重入网滞后 USB 枚举, 多等 2s 否则握手会发给还没上线的鼠标。
+        // - 有线: 插上瞬间枚举可能已有 ED03, 但设备内部尚未完全就绪, 此时写 ARM
+        //   曾把鼠标打挂到光标不动 (有线插上即冻即源于此)。多等 1s 让它稳定。
         if let Some(cand) = hid::best_light_link(&self.api, &self.wired, &self.wireless) {
-            if hid::classify_link(&cand.product_string, &self.wired, &self.wireless, cand.product_id) == "wireless" {
-                log("等待无线射频重入网 2 秒...");
-                std::thread::sleep(Duration::from_millis(2000));
+            let link = hid::classify_link(&cand.product_string, &self.wired, &self.wireless, cand.product_id);
+            let settle_ms = match link {
+                "wireless" => 2000,
+                "wired" => 1000,
+                _ => 0,
+            };
+            if settle_ms > 0 {
+                log(&format!("等待{}链路就绪 {} 秒...", hid::classify_label(link), settle_ms / 1000));
+                std::thread::sleep(Duration::from_millis(settle_ms));
                 self.reenumerate(log);
             }
         }
@@ -202,7 +218,7 @@ impl Bridge {
 
     fn connect(&mut self, exclude_path: Option<&str>, debug: bool, log: &dyn Fn(&str)) -> bool {
         self.disconnect();
-        let connected = hid::connect_audio(&self.api, &self.wired, &self.wireless, exclude_path, log);
+        let connected = hid::connect_audio(&self.api, &self.wired, &self.wireless, exclude_path, debug, log);
         let Some(c) = connected else { return false; };
 
         self.audio = Some(c.audio);
@@ -224,6 +240,29 @@ impl Bridge {
         match MsbcDecoder::new() {
             Ok(d) => { self.decoder = Some(d); true }
             Err(e) => { log(&format!("sbc 解码器初始化失败: {}", e)); false }
+        }
+    }
+
+    /// 重握手命令通道 (获取电池上报用)。
+    /// 优先复用连接时建立、保持打开的 `cmd` 句柄; 它已在 connect 时握手成功,
+    /// 再次 arm_existing 即可。仅当 `cmd` 缺失/失效时才重新 open (走 arm_mouse)。
+    /// 这样空闲/启动刷新只写固件、不反复开关临时句柄 (开关会给固件额外压力)。
+    /// 返回是否成功 (失败仅用于日志, 不影响主流程)。
+    fn rearm_command_channel(&mut self, debug: bool, log: &dyn Fn(&str), ctx: &str) -> bool {
+        // 复用常驻句柄
+        if let Some(ref cmd) = self.cmd {
+            if hid::arm_existing(cmd) {
+                return true;
+            }
+            if debug { log(&format!("{}: 常驻命令通道无应答, 尝试重开", ctx)); }
+        }
+        // 常驻句柄缺失或失效: 重新打开一个并保留为常驻句柄
+        match hid::arm_mouse(&self.api, Some(self.current_pid)) {
+            Some(dev) => { self.cmd = Some(dev); true }
+            None => {
+                if debug { log(&format!("{}: 握手无应答, 稍后重试", ctx)); }
+                false
+            }
         }
     }
 
@@ -403,9 +442,7 @@ impl Bridge {
                 self.need_post_connect_refresh = false;
                 self.last_idle_arm = now;
                 if debug { log("获取启动电量: 重握手一次..."); }
-                if hid::arm_mouse(&self.api, Some(self.current_pid)).is_none() && debug {
-                    log("启动电量刷新: 握手无应答, 等空闲刷新再试");
-                }
+                self.rearm_command_channel(debug, log, "启动电量刷新");
                 self.apply_ai_config(debug, log);
             }
 
@@ -420,9 +457,7 @@ impl Bridge {
             {
                 self.last_idle_arm = now;
                 if debug { log("空闲刷新: 重握手一次以获取电量上报..."); }
-                if hid::arm_mouse(&self.api, Some(self.current_pid)).is_none() && debug {
-                    log("空闲刷新: 握手无应答, 下次再试");
-                }
+                self.rearm_command_channel(debug, log, "空闲刷新");
                 self.apply_ai_config(debug, log);
             }
 
