@@ -12,6 +12,9 @@
 use std::os::raw::{c_int, c_ulong, c_void};
 use std::ptr;
 
+const MSBC_FRAME_LEN: usize = 57;
+const MSBC_CODESIZE: usize = 240;
+
 /// 与 sbc.h 的 `struct sbc_struct` 对应。字段顺序/布局必须与 C 完全一致。
 /// `priv` / `priv_alloc_base` 是解码器内部状态指针, 由 sbc_init_msbc 分配。
 #[repr(C)]
@@ -78,7 +81,11 @@ impl MsbcDecoder {
         // SAFETY: init 成功后可安全查询常量 (不修改状态)。
         let codesize = unsafe { sbc_get_codesize(&sbc as *const _ as *mut _) };
         let framelen = unsafe { sbc_get_frame_length(&sbc as *const _ as *mut _) };
-        Ok(Self { sbc, codesize, framelen })
+        Ok(Self {
+            sbc,
+            codesize,
+            framelen,
+        })
     }
 
     /// 解码器是否可用 (sbc 已静态链入, 始终可用)。
@@ -94,43 +101,35 @@ impl MsbcDecoder {
     /// 注意: sbc_decode 在标准 mSBC 帧上**不会** panic (与 mini_sbc 的 i32 溢出
     /// bug 无关), 故无需 catch_unwind。
     pub fn decode_frame(&mut self, payload: &[u8]) -> Option<Vec<u8>> {
-        if payload.is_empty() {
+        if payload.len() != MSBC_FRAME_LEN {
+            // 只接受完整 57 字节帧; 截断帧补零会被 sbc 误读为有效帧。
             return None;
         }
-        // sbc 要求至少 framelen 字节; 不足则补零到完整帧 (鼠标实际包总满 57B)。
-        let mut frame = [0u8; 64];
-        let len = payload.len().min(self.framelen);
-        frame[..len].copy_from_slice(&payload[..len]);
 
-        let mut out = vec![0u8; self.codesize];
+        let mut out = vec![0u8; MSBC_CODESIZE];
         let mut written: usize = 0;
-        // SAFETY: sbc, frame, out, written 均为本函数局部可变内存; 长度参数正确。
+        // SAFETY: sbc, out, written 均为本函数局部可变内存; 长度参数正确。
         let rc = unsafe {
             sbc_decode(
                 &mut self.sbc as *mut _,
-                frame.as_ptr() as *const c_void,
-                self.framelen,
+                payload.as_ptr() as *const c_void,
+                MSBC_FRAME_LEN,
                 out.as_mut_ptr() as *mut c_void,
-                self.codesize,
+                MSBC_CODESIZE,
                 &mut written as *mut _,
             )
         };
-        if rc < 0 || written == 0 {
+        if rc < 0 || written != MSBC_CODESIZE {
             return None;
         }
-        // mSBC 单帧 codesize 固定 240; 若 sbc 写入不足 (理论不应发生), 截断返回。
-        out.truncate(written);
-        if out.len() == self.codesize {
-            Some(out)
-        } else {
-            None
-        }
+        Some(out)
     }
 
     /// 解码一段拼接好的 mSBC 帧 (每 framelen 字节一帧), 返回拼接 PCM。
+    /// 尾部不足一帧的残缺数据被忽略 (不补零解码)。
     pub fn decode_all(&mut self, frames: &[u8]) -> Vec<u8> {
-        let mut pcm = Vec::with_capacity(frames.len() / self.framelen * self.codesize);
-        for chunk in frames.chunks(self.framelen) {
+        let mut pcm = Vec::with_capacity(frames.len() / MSBC_FRAME_LEN * MSBC_CODESIZE);
+        for chunk in frames.chunks_exact(MSBC_FRAME_LEN) {
             if let Some(p) = self.decode_frame(chunk) {
                 pcm.extend_from_slice(&p);
             }
@@ -164,5 +163,77 @@ mod tests {
         assert!(dec.decode_frame(&[]).is_none(), "空帧应返回 None");
         // 全零帧: sync 字 0 != 0xAD → sbc 拒帧返回 None。
         assert!(dec.decode_frame(&[0u8; 57]).is_none(), "全零帧应返回 None");
+        // 保留字节非零同样拒帧 (msbc_unpack_frame 要求 data[1]==0 && data[2]==0)。
+        let mut bad = [0u8; 57];
+        bad[0] = 0xAD;
+        bad[1] = 1;
+        assert!(dec.decode_frame(&bad).is_none(), "保留字节非零应返回 None");
+    }
+
+    #[test]
+    fn truncated_frames_are_rejected_not_zero_padded() {
+        let mut dec = MsbcDecoder::new().unwrap();
+        // 长度不是 57 的帧一律拒绝, 不再补零交给 sbc。
+        for len in [0usize, 1, 3, 4, 7, 8, 16, 32, 56, 58, 64] {
+            assert!(
+                dec.decode_frame(&[0u8; 64][..len]).is_none(),
+                "len={} 应返回 None",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn decode_all_ignores_incomplete_tail() {
+        let frames = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/msbc_frames.bin"
+        ))
+        .unwrap();
+        let reference = MsbcDecoder::new().unwrap().decode_all(&frames);
+        // 去掉 56 字节 (<1帧): 完整帧 239 个, 残尾 1 字节不产出 PCM。
+        let truncated = &frames[..frames.len() - 56];
+        let complete = truncated.len() / 57;
+        let mut dec = MsbcDecoder::new().unwrap();
+        let got = dec.decode_all(truncated);
+        assert_eq!(got.len(), complete * 240);
+        assert_eq!(got, reference[..complete * 240]);
+    }
+
+    #[test]
+    fn bad_first_frame_does_not_distort_following_valid_frames() {
+        let frames = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/msbc_frames.bin"
+        ))
+        .unwrap();
+        let reference = MsbcDecoder::new().unwrap().decode_all(&frames);
+
+        // 首帧同步字损坏 → 拒帧; 之后的合法帧必须与全新解码器逐字节一致。
+        let mut dec = MsbcDecoder::new().unwrap();
+        let mut bad_sync = frames[..57].to_vec();
+        bad_sync[0] = 0x00;
+        assert!(dec.decode_frame(&bad_sync).is_none());
+        let after_bad_sync = dec.decode_all(&frames);
+        assert_eq!(after_bad_sync, reference, "坏同步字首帧不得污染后续解码");
+
+        // 首帧保留字节非零 → 拒帧; 同样不得污染。
+        let mut dec = MsbcDecoder::new().unwrap();
+        let mut bad_reserved = frames[..57].to_vec();
+        bad_reserved[1] = 0x01;
+        assert!(dec.decode_frame(&bad_reserved).is_none());
+        let after_bad_reserved = dec.decode_all(&frames);
+        assert_eq!(
+            after_bad_reserved, reference,
+            "坏保留字节首帧不得污染后续解码"
+        );
+
+        // CRC 损坏帧 → 拒帧; 同样不得污染。
+        let mut dec = MsbcDecoder::new().unwrap();
+        let mut bad_crc = frames[..57].to_vec();
+        bad_crc[3] ^= 1;
+        assert!(dec.decode_frame(&bad_crc).is_none());
+        let after_bad_crc = dec.decode_all(&frames);
+        assert_eq!(after_bad_crc, reference, "坏 CRC 首帧不得污染后续解码");
     }
 }

@@ -7,3 +7,14 @@ License: LGPL-2.1-or-later  (see LICENSE.LGPL)
 
 Used here to decode mSBC frames (HFP, 16kHz mono) from the AJAZZ voice mouse.
 Only the decoder path (sbc_init_msbc / sbc_decode) is exercised at runtime.
+
+Local decoder patches (2026-10-24), in sbc.c:
+- Reject non-positive unpack results before initializing the synthesis state or
+  committing decoded format/length metadata. A bad first sync word or reserved
+  byte must not leave the decoder initialized with invalid filter offsets.
+- Clear *written at entry, including argument errors and parse-only calls.
+- Check consumed >= len * 8 before reading an audio bit, so truncated input
+  cannot read one byte past its declared length.
+The valid-frame synthesis path is unchanged. Real-library regressions in
+src/msbc.rs and tests/golden.rs cover rejected frames followed by valid streams;
+the checked-in golden PCM must remain byte-for-byte identical.

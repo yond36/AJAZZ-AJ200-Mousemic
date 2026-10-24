@@ -43,7 +43,12 @@ impl LinearResampler {
 
     /// 产出 `out_frames` 个输出样本写入 `out`。
     /// `src` 在需要下一个输入样本时被调用, 返回 None 表示输入已枯竭 (补 0)。
-    fn process(&mut self, out_frames: usize, src: &mut dyn FnMut() -> Option<f64>, out: &mut [f64]) {
+    fn process(
+        &mut self,
+        out_frames: usize,
+        src: &mut dyn FnMut() -> Option<f64>,
+        out: &mut [f64],
+    ) {
         let step = self.in_rate / self.out_rate;
         // 预热预读样本: 否则首个输出样本恒为 0 (nxt 从 0 开始), 造成起点毛刺。
         if !self.primed {
@@ -94,16 +99,19 @@ impl AudioOutput {
                 });
             match found {
                 Some(d) => d,
-                None => return Err(anyhow!("找不到输出设备 '{}' (用 --list 查看可用设备)", name)),
+                None => {
+                    return Err(anyhow!(
+                        "找不到输出设备 '{}' (用 --list 查看可用设备)",
+                        name
+                    ))
+                }
             }
         } else {
             host.default_output_device()
                 .ok_or_else(|| anyhow!("没有默认输出设备"))?
         };
 
-        let dev_name = device
-            .name()
-            .unwrap_or_else(|_| "<未知设备>".to_string());
+        let dev_name = device.name().unwrap_or_else(|_| "<未知设备>".to_string());
 
         let default_cfg = device
             .default_output_config()
@@ -136,7 +144,9 @@ impl AudioOutput {
             Self::build::<i16>(&device, &config, cb_state.clone())?
         };
 
-        stream.play().map_err(|e| anyhow!("启动输出流失败: {}", e))?;
+        stream
+            .play()
+            .map_err(|e| anyhow!("启动输出流失败: {}", e))?;
         Ok(AudioOutput {
             stream,
             state,
@@ -165,7 +175,13 @@ impl AudioOutput {
                 },
                 None,
             )
-            .map_err(|e| anyhow!("构建输出流失败: {} (设备可能不支持 {}Hz)", e, config.sample_rate.0))
+            .map_err(|e| {
+                anyhow!(
+                    "构建输出流失败: {} (设备可能不支持 {}Hz)",
+                    e,
+                    config.sample_rate.0
+                )
+            })
     }
 
     /// cpal 回调: 从输入队列取 16k mono 样本, 重采样后写入多声道缓冲。

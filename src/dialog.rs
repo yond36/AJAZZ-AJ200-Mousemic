@@ -4,15 +4,21 @@
 //! `eframe::run_native` 返回的错误都会“无声无息”地消失, 表现为“只有黑框/什么都没发生”。
 //! 这里集中提供: 弹出错误框 + 安装 panic 钩子, 让所有失败都看得见。
 
+#[cfg(any(windows, test))]
+fn wide_c_string(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 #[cfg(windows)]
 mod imp {
+    use super::wide_c_string;
     use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
     /// 弹出一个错误对话框 (阻塞, 直到用户点确定)。
     pub fn show_error_box(msg: &str) {
-        let title: Vec<u16> = "MouseMic 错误".encode_utf16().collect();
-        let text: Vec<u16> = msg.encode_utf16().collect();
+        let title = wide_c_string("MouseMic 错误");
+        let text = wide_c_string(msg);
         unsafe {
             let _ = MessageBoxW(
                 None,
@@ -35,7 +41,7 @@ mod imp {
             };
             let loc = if let Some(l) = info.location() {
                 format!(" ({}:{})", l.file(), l.line())
-                } else {
+            } else {
                 String::new()
             };
             show_error_box(&format!("MouseMic 发生未捕获错误:\n{}{}", payload, loc));
@@ -50,3 +56,18 @@ mod imp {
 }
 
 pub use imp::*;
+
+#[cfg(test)]
+mod tests {
+    use super::wide_c_string;
+
+    #[test]
+    fn wide_strings_are_nul_terminated() {
+        for text in ["", "MouseMic 错误", "解码失败 𠮷"] {
+            let wide = wide_c_string(text);
+            assert_eq!(wide.last(), Some(&0));
+            assert_eq!(wide.len(), text.encode_utf16().count() + 1);
+            assert_eq!(String::from_utf16(&wide[..wide.len() - 1]).unwrap(), text);
+        }
+    }
+}

@@ -3,10 +3,18 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-fn default_mode() -> String { "play".to_string() }
-fn default_cable() -> String { "CABLE Input".to_string() }
-fn default_driver() -> String { "sendinput".to_string() }
-fn default_auto_enter_mode() -> String { "enter".to_string() }
+fn default_mode() -> String {
+    "play".to_string()
+}
+fn default_cable() -> String {
+    "CABLE Input".to_string()
+}
+fn default_driver() -> String {
+    "sendinput".to_string()
+}
+fn default_auto_enter_mode() -> String {
+    "enter".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -107,14 +115,20 @@ impl Config {
                     u16::from_str_radix(hex, 16).ok()
                 } else {
                     // 无前缀 → 先按十进制; 失败再兜底试十六进制 (兼容旧写法 "ED03")
-                    t.parse::<u16>().ok().or_else(|| u16::from_str_radix(t, 16).ok())
+                    t.parse::<u16>()
+                        .ok()
+                        .or_else(|| u16::from_str_radix(t, 16).ok())
                 }
             })
             .collect()
     }
 
-    pub fn wired_pids(&self) -> std::collections::HashSet<u16> { Self::coerce_pids(&self.wired_pids) }
-    pub fn wireless_pids(&self) -> std::collections::HashSet<u16> { Self::coerce_pids(&self.wireless_pids) }
+    pub fn wired_pids(&self) -> std::collections::HashSet<u16> {
+        Self::coerce_pids(&self.wired_pids)
+    }
+    pub fn wireless_pids(&self) -> std::collections::HashSet<u16> {
+        Self::coerce_pids(&self.wireless_pids)
+    }
 
     /// 热键名是否"真实绑定"(None 或字面量 "无" 都视为未绑定)。
     fn hotkey_bound(name: &Option<String>) -> bool {
@@ -136,7 +150,11 @@ impl Config {
             Ok(s) => match serde_json::from_str(&s) {
                 Ok(c) => c,
                 Err(e) => {
-                    log::warn!("配置解析失败 ({}), 已回退默认配置: {}", Self::config_path().display(), e);
+                    log::warn!(
+                        "配置解析失败 ({}), 已回退默认配置: {}",
+                        Self::config_path().display(),
+                        e
+                    );
                     Config::default()
                 }
             },
@@ -147,9 +165,8 @@ impl Config {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let mut clone = self.clone();
-        clone.autostart = is_autostart_on(); // 不写进 JSON
-        let s = serde_json::to_string_pretty(&clone).unwrap_or_default();
+        // autostart 已由 serde(skip) 排除, 保存 JSON 不需要再访问注册表。
+        let s = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(Self::config_path(), s)
     }
 }
@@ -164,16 +181,23 @@ mod registry {
 
     pub fn set_autostart(enable: bool) -> std::io::Result<()> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let key = hkcu.open_subkey_with_flags(REG_KEY, KEY_SET_VALUE)
-            .or_else(|_| hkcu.create_subkey_with_flags(REG_KEY, KEY_SET_VALUE).map(|(k, _)| k))?;
+        let key = hkcu
+            .open_subkey_with_flags(REG_KEY, KEY_SET_VALUE)
+            .or_else(|_| {
+                hkcu.create_subkey_with_flags(REG_KEY, KEY_SET_VALUE)
+                    .map(|(k, _)| k)
+            })?;
         if enable {
             // 打包后直接跑 exe 自身; 开发模式用 pythonw 跑脚本由 GUI 决定, 这里统一用 exe 路径。
             let exe = std::env::current_exe().map_err(std::io::Error::other)?;
             let val = format!("\"{}\" --autostart", exe.display());
             key.set_value(REG_NAME, &val)
         } else {
-            let _ = key.delete_value(REG_NAME);
-            Ok(())
+            match key.delete_value(REG_NAME) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            }
         }
     }
 
@@ -188,8 +212,12 @@ mod registry {
 
 #[cfg(not(windows))]
 mod registry {
-    pub fn set_autostart(_enable: bool) -> std::io::Result<()> { Ok(()) }
-    pub fn is_autostart_on() -> bool { false }
+    pub fn set_autostart(_enable: bool) -> std::io::Result<()> {
+        Ok(())
+    }
+    pub fn is_autostart_on() -> bool {
+        false
+    }
 }
 
 pub use registry::{is_autostart_on, set_autostart};

@@ -15,8 +15,20 @@ pub struct DeviceInfo {
     pub note: &'static str,
 }
 
-const fn d(pid: u16, model: &'static str, sensor: &'static str, flywheel: bool, note: &'static str) -> DeviceInfo {
-    DeviceInfo { pid, model, sensor, flywheel, note }
+const fn d(
+    pid: u16,
+    model: &'static str,
+    sensor: &'static str,
+    flywheel: bool,
+    note: &'static str,
+) -> DeviceInfo {
+    DeviceInfo {
+        pid,
+        model,
+        sensor,
+        flywheel,
+        note,
+    }
 }
 
 /// AJ200 系列全部支持的 (PID, 型号) 记录 (22 条记录 / 21 个唯一 PID, 0xFC0C 两型号共用)。
@@ -40,7 +52,13 @@ pub const SUPPORTED_DEVICES: &[DeviceInfo] = &[
     d(0xED0B, "AJ200P NL AI ULTRA+", "PAW3950", true, ""),
     d(0xED0C, "AJ200P NL AI ULTRA+", "PAW3950", true, ""),
     // AJ200P NL AI ULTRA-3955 (飞轮; 0xFC0C 与 ULTRA+ 同 PID 共用)
-    d(0xFC0C, "AJ200P NL AI ULTRA-3955", "PAW3950*", true, "与 ULTRA+ 同 PID"),
+    d(
+        0xFC0C,
+        "AJ200P NL AI ULTRA-3955",
+        "PAW3950*",
+        true,
+        "与 ULTRA+ 同 PID",
+    ),
     d(0xED1D, "AJ200P NL AI ULTRA-3955", "PAW3955", true, ""),
     // AJ200P AI MASTER (3955, 飞轮)
     d(0xFC1E, "AJ200P AI MASTER", "PAW3955", true, ""),

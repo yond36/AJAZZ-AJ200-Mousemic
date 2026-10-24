@@ -3,7 +3,7 @@
 本目录是用 Rust 对原 Python 版 MouseMic（AJAZZ 语音鼠标的 mSBC→PCM 桥接）的完整重写。
 本文记录**已验证可编译/测试/构建**的环境与步骤，并收录编译期踩过的 API 坑，避免重建时重蹈覆辙。
 
-当前版本：**v1.4.3**（与 `Cargo.toml` / `Cargo.lock` / git tag 一致）。
+当前版本：**v1.4.7**（与 `Cargo.toml` / `Cargo.lock` 一致）。
 
 ## 1. 先决条件（本机 Windows）
 
@@ -36,7 +36,7 @@ mSBC 解码**不再依赖 `libsbc.dll`，也不用 `mini_sbc` crate**。实现�
 ## 3. 构建 / 测试命令
 
 ```sh
-cd rust
+# 在仓库根目录执行（无需 cd）
 # 仅构建无 GUI 的核心库 + CLI（用于快速校验 / 无头运行）
 cargo build --release --no-default-features
 cargo test  --no-default-features      # 单元测试 + golden 向量测试
@@ -46,9 +46,9 @@ cargo build --release                  # 产物 target/release/MouseMic.exe (~1.
 cargo test                             # 含 GUI 的完整测试
 ```
 
-编译目标：`x86_64-pc-windows-msvc`。
+编译目标：`x86_64-pc-windows-msvc`。需要 Rust 1.82+。
 
-**测试内容**（共 12 个，全部通过）：
+**测试内容**（共 35 个，全部通过）：
 - 单元测试 10 个：`devices`（PID 白名单）、`hid`（电池解析）、`msbc`（解码常量/空帧/坏帧）、
   `config`（PID 字符串解析、AI 键启用判定）。
 - 集成测试 2 个（`tests/golden.rs`）：

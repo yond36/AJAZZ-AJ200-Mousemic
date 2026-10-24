@@ -492,7 +492,7 @@ static int sbc_unpack_frame_internal(const uint8_t *data,
 
 				audio_sample = 0;
 				for (bit = 0; bit < bits[ch][sb]; bit++) {
-					if (consumed > len * 8)
+					if (consumed >= len * 8)
 						return -1;
 
 					if ((data[consumed >> 3] >> (7 - (consumed & 0x7))) & 0x01)
@@ -1226,12 +1226,22 @@ SBC_EXPORT ssize_t sbc_decode(sbc_t *sbc, const void *input, size_t input_len,
 	char *ptr;
 	int i, ch, framelen, samples;
 
+	if (written)
+		*written = 0;
+
 	if (!sbc || !input)
 		return -EIO;
 
 	priv = sbc->priv;
 
 	framelen = priv->unpack_frame(input, &priv->frame, input_len);
+
+	/* Local patch: reject the frame before the decoder state and the decoded
+	 * format/length metadata are committed. A bad first sync word or reserved
+	 * byte must not initialize the synthesis filter with invalid offsets that
+	 * would permanently distort all following valid frames. */
+	if (framelen <= 0)
+		return framelen;
 
 	if (!priv->init) {
 		sbc_decoder_init(&priv->dec_state, &priv->frame);
@@ -1252,12 +1262,6 @@ SBC_EXPORT ssize_t sbc_decode(sbc_t *sbc, const void *input, size_t input_len,
 	}
 
 	if (!output)
-		return framelen;
-
-	if (written)
-		*written = 0;
-
-	if (framelen <= 0)
 		return framelen;
 
 	samples = sbc_synthesize_audio(&priv->dec_state, &priv->frame);

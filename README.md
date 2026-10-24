@@ -38,6 +38,8 @@ AJ200 系列（仅列主要型号，完整列表见 `src/devices.rs`）：
 - [VB-CABLE](https://vb-audio.com/Cable/index.htm)（虚拟麦克风模式需要）
 - [Interception](https://github.com/oblitum/Interception)（可选，仅当模拟按键在特定程序中失效时需要）
 
+> 注：Rust 版本需 1.82+（构建用）。
+
 ## 下载
 
 从 [Releases](../../releases) 下载最新 `MouseMic.exe`，放到任意目录运行即可。
@@ -45,7 +47,7 @@ AJ200 系列（仅列主要型号，完整列表见 `src/devices.rs`）：
 ## 构建
 
 ```bash
-# 需要 Rust 1.75+ 和 MSVC 编译工具链
+# 需要 Rust 1.82+ 和 MSVC 编译工具链
 git clone https://github.com/yond36/AJAZZ-AJ200-Mousemic.git
 cd AJAZZ-AJ200-Mousemic
 cargo build --release

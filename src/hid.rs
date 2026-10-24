@@ -8,6 +8,47 @@ use crate::{devices, AUDIO_USAGE_PAGE, CMD_USAGE_PAGES, VID};
 use hidapi::{HidApi, HidDevice};
 use std::collections::HashSet;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+pub(crate) fn wait_or_stop(stop: &AtomicBool, duration: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let remaining = duration.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+}
+
+#[cfg(windows)]
+fn container_id(device: &HidDevice) -> Option<[u8; 16]> {
+    let id = device.get_container_id().ok()?;
+    let mut bytes = [0u8; 16];
+    bytes[..4].copy_from_slice(&id.data1.to_le_bytes());
+    bytes[4..6].copy_from_slice(&id.data2.to_le_bytes());
+    bytes[6..8].copy_from_slice(&id.data3.to_le_bytes());
+    bytes[8..].copy_from_slice(&id.data4);
+    (bytes != [0; 16]).then_some(bytes)
+}
+
+#[cfg(not(windows))]
+fn container_id(_device: &HidDevice) -> Option<[u8; 16]> {
+    None
+}
+
+fn same_container(expected: Option<[u8; 16]>, actual: Option<[u8; 16]>) -> bool {
+    matches!((expected, actual), (Some(a), Some(b)) if a != [0; 16] && a == b)
+}
+
+fn open_related(api: &HidApi, path: &str, container: [u8; 16]) -> Option<HidDevice> {
+    let device = open_by_path(api, path)?;
+    same_container(Some(container), container_id(&device)).then_some(device)
+}
 
 /// 把存储的 path 字符串转为 CString 并打开 HID 设备。
 /// HID 路径通常为 ASCII (如 `\\?\hid#vid_363c...`), 安全; 含 NUL 则返回 None。
@@ -33,7 +74,6 @@ fn pkt(c: u8, tail: &[u8]) -> [u8; 64] {
     b
 }
 
-
 /// 构造激活序列 (等价于 Python 的 ARM_SEQ 列表)。
 pub fn build_arm_seq() -> Vec<[u8; 64]> {
     vec![
@@ -44,15 +84,23 @@ pub fn build_arm_seq() -> Vec<[u8; 64]> {
         pkt(0x17, &[]),
         pkt(0x19, &[]),
         pkt(0x51, &[]),
-        pkt(0x55, &[
-            0x1a, 0x18, 0x01, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x04, 0x00, 0x00, 0x08, 0x01, 0x00,
-            0x10, 0x02, 0x00, 0x20, 0x00, 0x00, 0x40, 0x00, 0x00, 0x80, 0x00,
-        ]),
+        pkt(
+            0x55,
+            &[
+                0x1a, 0x18, 0x01, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x04, 0x00, 0x00, 0x08, 0x01,
+                0x00, 0x10, 0x02, 0x00, 0x20, 0x00, 0x00, 0x40, 0x00, 0x00, 0x80, 0x00,
+            ],
+        ),
     ]
 }
 
 /// 判断某 HID 设备是有线还是无线 (主依据 product_string, 配置 PID 仅兜底)。
-pub fn classify_link(ps: &str, wired_pids: &HashSet<u16>, wireless_pids: &HashSet<u16>, pid: u16) -> &'static str {
+pub fn classify_link(
+    ps: &str,
+    wired_pids: &HashSet<u16>,
+    wireless_pids: &HashSet<u16>,
+    pid: u16,
+) -> &'static str {
     if wired_pids.contains(&pid) {
         return "wired";
     }
@@ -80,7 +128,11 @@ pub fn classify_label(link: &str) -> &'static str {
 /// 枚举所有支持的 AJAZZ 音频接口 (usage_page=0xFFAA, PID 须命中 devices::SUPPORTED_DEVICES)。
 pub fn enumerate_audio(api: &HidApi) -> Vec<AjazzDevice> {
     api.device_list()
-        .filter(|d| d.vendor_id() == VID && d.usage_page() == AUDIO_USAGE_PAGE && devices::is_supported(d.product_id()))
+        .filter(|d| {
+            d.vendor_id() == VID
+                && d.usage_page() == AUDIO_USAGE_PAGE
+                && devices::is_supported(d.product_id())
+        })
         .map(|d| AjazzDevice {
             path: d.path().to_string_lossy().into_owned(),
             product_id: d.product_id(),
@@ -138,10 +190,13 @@ pub fn find_command_paths(api: &HidApi, audio_pid: Option<u16>) -> Vec<String> {
             }
         }
     }
-    if paths.is_empty() {
+    if paths.is_empty() && audio_pid.is_none() {
         for &up in &CMD_USAGE_PAGES {
             for d in api.device_list() {
-                if d.vendor_id() == VID && d.usage_page() == up && devices::is_supported(d.product_id()) {
+                if d.vendor_id() == VID
+                    && d.usage_page() == up
+                    && devices::is_supported(d.product_id())
+                {
                     let p = d.path().to_string_lossy().into_owned();
                     if seen.insert(p.clone()) {
                         paths.push(p);
@@ -162,34 +217,92 @@ pub fn find_command_paths(api: &HidApi, audio_pid: Option<u16>) -> Vec<String> {
 ///
 /// 单独抽出便于复用已有长生命周期句柄 (如 Bridge::cmd), 避免每次重新 open/close。
 pub fn arm_existing(dev: &HidDevice) -> bool {
-    for p in &build_arm_seq() {
-        if dev.write(p).unwrap_or(0) != 64 {
+    arm_existing_until(dev, &AtomicBool::new(false))
+}
+
+fn run_arm_sequence(
+    stop: &AtomicBool,
+    mut send: impl FnMut(&[u8; 64]) -> bool,
+    mut rollback: impl FnMut(),
+) -> bool {
+    let mut activation_sent = false;
+    for packet in build_arm_seq() {
+        if stop.load(Ordering::SeqCst) {
+            if activation_sent {
+                rollback();
+            }
             return false;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        // 读 0x0A 应答; 只有硬错误才视为握手不通过。
-        // 注意: 必须保持宽松 (Ok(0) 超时也接受)。曾试过要求 n>0 来拦截拔线残留
-        // 句柄, 结果固件并非每包都按时应答, 导致重连循环连续轰炸 ARM 序列、
-        // 直接把鼠标打到光标完全不动。两害取其轻: 宁可连上后收不到包
-        // (由读取分支触发重连), 也绝不连续写固件。
-        let mut rbuf = [0u8; 64];
-        match dev.read_timeout(&mut rbuf, 300) {
-            Ok(_) => {}
-            Err(_) => return false,
+        activation_sent |= packet[1] == 0x55;
+        if !send(&packet) {
+            if activation_sent {
+                rollback();
+            }
+            return false;
         }
+    }
+    if stop.load(Ordering::SeqCst) {
+        if activation_sent {
+            rollback();
+        }
+        return false;
     }
     true
 }
 
+pub(crate) fn arm_existing_until(dev: &HidDevice, stop: &AtomicBool) -> bool {
+    run_arm_sequence(
+        stop,
+        |packet| {
+            if dev.write(packet).unwrap_or(0) != 64 {
+                return false;
+            }
+            if !wait_or_stop(stop, Duration::from_millis(20)) {
+                return false;
+            }
+            // 固件并非每包都应答; 超时仍可接受, 只有硬错误使握手失败。
+            let mut reply = [0u8; 64];
+            dev.read_timeout(&mut reply, 300).is_ok()
+        },
+        || {
+            ai_off(dev);
+        },
+    )
+}
+
 /// 打开命令通道并发送激活序列。握手成功返回保持打开的设备 (需存活整个运行期); 失败返回 None。
 pub fn arm_mouse(api: &HidApi, audio_pid: Option<u16>) -> Option<HidDevice> {
-    for path in find_command_paths(api, audio_pid) {
-        let dev = match open_by_path(api, &path) {
-            Some(d) => d,
-            None => continue,
+    let stop = AtomicBool::new(false);
+    for candidate in enumerate_audio(api) {
+        if audio_pid.is_some_and(|pid| pid != candidate.product_id) {
+            continue;
+        }
+        let Some(audio) = open_by_path(api, &candidate.path) else {
+            continue;
         };
-        if arm_existing(&dev) {
-            return Some(dev);
+        if let Some(cmd) = arm_for_audio(api, &audio, candidate.product_id, &stop) {
+            return Some(cmd);
+        }
+    }
+    None
+}
+
+pub(crate) fn arm_for_audio(
+    api: &HidApi,
+    audio: &HidDevice,
+    pid: u16,
+    stop: &AtomicBool,
+) -> Option<HidDevice> {
+    let container = container_id(audio)?;
+    for path in find_command_paths(api, Some(pid)) {
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
+        let Some(device) = open_related(api, &path, container) else {
+            continue;
+        };
+        if arm_existing_until(&device, stop) {
+            return Some(device);
         }
     }
     None
@@ -199,15 +312,23 @@ pub struct Connected {
     pub audio: HidDevice,
     pub cmd: HidDevice,
     pub control: Option<HidDevice>,
-    pub consumer: Option<HidDevice>,  // Consumer Control, 读 0x0C 按键事件
-    pub battery: Option<HidDevice>,   // 电池状态接口 (0xFFA0 usage=0x0002, 被动上报)
+    pub consumer: Option<HidDevice>, // Consumer Control, 读 0x0C 按键事件
+    pub battery: Option<HidDevice>,  // 电池状态接口 (0xFFA0 usage=0x0002, 被动上报)
     pub path: String,
     pub pid: u16,
     pub product_string: String,
 }
 
 /// 发送一条 AI 键配置报告 (内部辅助)。
-fn send_ai_report(control: &HidDevice, mask: u8, enable: u8, bw_short: u8, bw_long: u8, fw_short: u8, fw_long: u8) -> bool {
+fn send_ai_report(
+    control: &HidDevice,
+    mask: u8,
+    enable: u8,
+    bw_short: u8,
+    bw_long: u8,
+    fw_short: u8,
+    fw_long: u8,
+) -> bool {
     let mut report = [0u8; 32];
     report[0] = 0x0b;
     report[1] = 0x55;
@@ -215,8 +336,13 @@ fn send_ai_report(control: &HidDevice, mask: u8, enable: u8, bw_short: u8, bw_lo
     report[3] = mask;
     report[4] = enable;
     report[5] = 0x01;
-    let payload: [u8; 22] = [0,0, 0x02,0,0, 0x04,0,0, 0x08,bw_short,bw_long, 0x10,fw_short,fw_long, 0x20,0,0, 0x40,0,0, 0x80,0];
-    for (i, b) in payload.iter().enumerate() { report[6 + i] = *b; }
+    let payload: [u8; 22] = [
+        0, 0, 0x02, 0, 0, 0x04, 0, 0, 0x08, bw_short, bw_long, 0x10, fw_short, fw_long, 0x20, 0, 0,
+        0x40, 0, 0, 0x80, 0,
+    ];
+    for (i, b) in payload.iter().enumerate() {
+        report[6 + i] = *b;
+    }
     control.write(&report).unwrap_or(0) == 32
 }
 
@@ -245,8 +371,12 @@ pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
     }
 }
 
-pub fn ai_on(control: &HidDevice) -> bool { set_ai_keys(control, true, true) }
-pub fn ai_off(control: &HidDevice) -> bool { set_ai_keys(control, false, false) }
+pub fn ai_on(control: &HidDevice) -> bool {
+    set_ai_keys(control, true, true)
+}
+pub fn ai_off(control: &HidDevice) -> bool {
+    set_ai_keys(control, false, false)
+}
 
 /// 打开鼠标音频接口 + 命令通道。返回连接元组; 全部失败返回 None。
 /// log: 可选诊断回调。
@@ -261,78 +391,109 @@ pub fn connect_audio(
     let candidates = priority_order(api, wired_pids, wireless_pids, exclude_path);
     if candidates.is_empty() {
         log("未找到受支持的 AJ200 系列鼠标音频 HID 接口 (usage_page=0xFFAA)。请确认鼠标已连接(无线接收器或数据线), 且型号在支持列表内。");
+    }
+    let stop = AtomicBool::new(false);
+    candidates
+        .iter()
+        .find_map(|candidate| connect_candidate(api, candidate, &stop, debug, log))
+}
+
+pub(crate) fn connect_candidate(
+    api: &HidApi,
+    candidate: &AjazzDevice,
+    stop: &AtomicBool,
+    debug: bool,
+    log: &dyn Fn(&str),
+) -> Option<Connected> {
+    if stop.load(Ordering::SeqCst) {
         return None;
     }
-    let mut tried = Vec::new();
-    for d in &candidates {
-        let cmd = match arm_mouse(api, Some(d.product_id)) {
-            Some(c) => c,
-            None => {
-                tried.push(format!("PID={:04X} ({}) 命令通道握手失败(无应答, 可能为拔线残留句柄)", d.product_id, d.product_string));
-                continue;
-            }
-        };
-        match open_by_path(api, &d.path) {
-            Some(audio) => {
-                let control = api.device_list()
-                    .filter(|dd| dd.vendor_id() == 0x363C
-                        && dd.product_id() == d.product_id
-                        && dd.usage_page() == 0xffa0)
-                    .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
-                if control.is_none() && debug {
-                    log("警告: control 接口 (0xFFA0) 打开失败, AI 键配置无法生效");
-                }
-                let consumer = api.device_list()
-                    .filter(|dd| dd.vendor_id() == 0x363C
-                        && dd.product_id() == d.product_id
-                        && dd.usage_page() == 0x000c
-                        && dd.usage() == 0x0001)
-                    .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
-                if consumer.is_none() && debug {
-                    log("警告: Consumer Control 接口 (0x0C) 打开失败, 语音键按下事件可能收不到");
-                }
-                // 电池状态接口: 0xFFA0 usage=0x0002, 鼠标被动上报 (参考 battery_monitor.js)
-                // 注意: 部分链路 (如有线) 可能不暴露该接口, 此时电量显示为 "--", 属正常。
-                let battery = api.device_list()
-                    .filter(|dd| dd.vendor_id() == 0x363C
-                        && dd.product_id() == d.product_id
-                        && dd.usage_page() == 0xffa0
-                        && dd.usage() == 0x0002)
-                    .find_map(|dd| open_by_path(api, dd.path().to_string_lossy().as_ref()));
-                if debug {
-                    if battery.is_none() {
-                        log("提示: 未找到电池状态接口 (0xFFA0/0x0002), 本链路不显示电量");
-                    }
-                    log(&format!("已选定音频链路: PID={:04X} {} 路径={}", d.product_id, d.product_string, d.path));
-                }
-                return Some(Connected {
-                    audio,
-                    cmd,
-                    control,
-                    consumer,
-                    battery,
-                    path: d.path.clone(),
-                    pid: d.product_id,
-                    product_string: d.product_string.clone(),
-                });
-            }
-            None => {
-                tried.push(format!("PID={:04X} 音频接口打开失败", d.product_id));
-            }
+    // 先取得音频与同一物理设备的接口, 再执行会改变 AI 配置的握手。
+    let audio = match open_by_path(api, &candidate.path) {
+        Some(device) => device,
+        None => {
+            log(&format!(
+                "PID={:04X} 音频接口打开失败",
+                candidate.product_id
+            ));
+            return None;
+        }
+    };
+    let container = match container_id(&audio) {
+        Some(id) => id,
+        None => {
+            log(&format!(
+                "PID={:04X} 无法确定物理设备身份, 已跳过以避免控制其他鼠标",
+                candidate.product_id
+            ));
+            return None;
+        }
+    };
+    let related = |usage_page, usage: Option<u16>| {
+        api.device_list()
+            .filter(|device| {
+                device.vendor_id() == VID
+                    && device.product_id() == candidate.product_id
+                    && device.usage_page() == usage_page
+                    && usage.is_none_or(|value| device.usage() == value)
+            })
+            .find_map(|device| {
+                open_related(api, device.path().to_string_lossy().as_ref(), container)
+            })
+    };
+    let control = related(0xFFA0, None);
+    let consumer = related(0x000C, Some(0x0001));
+    let battery = related(0xFFA0, Some(0x0002));
+    if debug {
+        if control.is_none() {
+            log("警告: 同设备 control 接口 (0xFFA0) 不可用, AI 配置将使用命令通道");
+        }
+        if consumer.is_none() {
+            log("警告: 同设备 Consumer Control 接口 (0x0C) 不可用, 可能收不到按键事件");
+        }
+        if battery.is_none() {
+            log("提示: 同设备电池接口 (0xFFA0/0x0002) 不可用, 本链路不显示电量");
         }
     }
-    log(&format!(
-        "找到鼠标音频接口但无法建立连接。诊断: {}",
-        tried.join("; ")
-    ));
-    None
+    let cmd = match arm_for_audio(api, &audio, candidate.product_id, stop) {
+        Some(device) => device,
+        None => {
+            if !stop.load(Ordering::SeqCst) {
+                log(&format!(
+                    "PID={:04X} 同设备命令通道握手失败",
+                    candidate.product_id
+                ));
+            }
+            return None;
+        }
+    };
+    if debug {
+        log(&format!(
+            "已选定音频链路: PID={:04X} {} 路径={}",
+            candidate.product_id, candidate.product_string, candidate.path
+        ));
+    }
+    Some(Connected {
+        audio,
+        cmd,
+        control,
+        consumer,
+        battery,
+        path: candidate.path.clone(),
+        pid: candidate.product_id,
+        product_string: candidate.product_string.clone(),
+    })
 }
 
 /// 返回当前真实在线的音频链路 (基于激活握手确认); 都不在线返回 None。
 /// 注意: 会向固件写 8 包 ARM 序列 (每包 20ms + 最长 300ms 应答等待),
 /// 最坏阻塞 2.5s 并可能让鼠标固件忙到光标卡死, 禁止在主循环周期探测里调用。
 /// 周期探测请用 `best_light_link` (纯枚举, 零写入); 本函数仅保留给排错/兼容。
-pub fn live_link(api: &HidApi, wired_pids: &HashSet<u16>, wireless_pids: &HashSet<u16>) -> Option<AjazzDevice> {
+pub fn live_link(
+    api: &HidApi,
+    wired_pids: &HashSet<u16>,
+    wireless_pids: &HashSet<u16>,
+) -> Option<AjazzDevice> {
     priority_order(api, wired_pids, wireless_pids, None)
         .into_iter()
         .find(|d| arm_mouse(api, Some(d.product_id)).is_some())
@@ -345,7 +506,9 @@ pub fn best_light_link(
     wired_pids: &HashSet<u16>,
     wireless_pids: &HashSet<u16>,
 ) -> Option<AjazzDevice> {
-    priority_order(api, wired_pids, wireless_pids, None).into_iter().next()
+    priority_order(api, wired_pids, wireless_pids, None)
+        .into_iter()
+        .next()
 }
 
 /// 解析电池状态上报报告 [0x0A, 0x13, ...]:
@@ -415,6 +578,82 @@ pub fn list_hid(log: &dyn Fn(&str)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matches_only_known_physical_containers() {
+        assert!(same_container(Some([1; 16]), Some([1; 16])));
+        assert!(!same_container(Some([1; 16]), Some([2; 16])));
+        assert!(!same_container(None, None));
+        assert!(!same_container(Some([1; 16]), None));
+        assert!(!same_container(Some([0; 16]), Some([0; 16])));
+    }
+
+    #[test]
+    fn cancelled_wait_returns_without_waiting() {
+        let stop = AtomicBool::new(true);
+        assert!(!wait_or_stop(&stop, Duration::from_secs(60)));
+        stop.store(false, Ordering::SeqCst);
+        assert!(wait_or_stop(&stop, Duration::ZERO));
+    }
+
+    #[test]
+    fn activation_failure_rolls_back_once() {
+        let stop = AtomicBool::new(false);
+        let mut packets = 0;
+        let mut rollbacks = 0;
+        assert!(!run_arm_sequence(
+            &stop,
+            |packet| {
+                packets += 1;
+                packet[1] != 0x55
+            },
+            || rollbacks += 1
+        ));
+        assert_eq!(packets, 8);
+        assert_eq!(rollbacks, 1);
+    }
+
+    #[test]
+    fn cancellation_after_activation_rolls_back() {
+        let stop = AtomicBool::new(false);
+        let mut rollbacks = 0;
+        assert!(!run_arm_sequence(
+            &stop,
+            |packet| {
+                if packet[1] == 0x55 {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                true
+            },
+            || rollbacks += 1
+        ));
+        assert_eq!(rollbacks, 1);
+    }
+
+    #[test]
+    fn cancelled_handshake_never_writes() {
+        let stop = AtomicBool::new(true);
+        assert!(!run_arm_sequence(
+            &stop,
+            |_| panic!("cancelled handshake wrote a packet"),
+            || panic!("no activation to roll back")
+        ));
+    }
+
+    #[test]
+    fn successful_handshake_does_not_roll_back() {
+        let stop = AtomicBool::new(false);
+        let mut packets = 0;
+        assert!(run_arm_sequence(
+            &stop,
+            |_| {
+                packets += 1;
+                true
+            },
+            || panic!("successful activation rolled back")
+        ));
+        assert_eq!(packets, 8);
+    }
 
     #[test]
     fn battery_parse_ok() {

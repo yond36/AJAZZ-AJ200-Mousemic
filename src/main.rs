@@ -17,11 +17,14 @@ use std::sync::Arc;
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait};
 use mousemic_rs::{
-    config::Config, hid, hotkey::HOTKEY_NAMES, bridge::Bridge, single_instance, SAMPLE_RATE,
+    bridge::Bridge, config::Config, hid, hotkey::HOTKEY_NAMES, single_instance, SAMPLE_RATE,
 };
 
 #[derive(Parser)]
-#[command(name = "MouseMic", about = "AJAZZ 语音鼠标桥接为系统麦克风 (Rust 重写)")]
+#[command(
+    name = "MouseMic",
+    about = "AJAZZ 语音鼠标桥接为系统麦克风 (Rust 重写)"
+)]
 struct Cli {
     /// 列出可用音频输出设备。
     #[arg(long)]
@@ -64,6 +67,15 @@ fn main() {
         simplelog::ColorChoice::Auto,
     )
     .ok();
+
+    // 发布版是 Windows GUI 子系统 (双击不弹黑窗), 但从控制台启动 CLI 时必须
+    // 重新挂回父控制台, 否则 stdout/stderr 丢失、Ctrl+C 无法送达 (WAV 模式将
+    // 无法干净收尾)。双击启动 (无父控制台) 时 AttachConsole 失败, 无副作用。
+    let cli_mode =
+        cli.list || cli.list_hid || cli.play || cli.cable.is_some() || cli.file.is_some();
+    if cli_mode {
+        attach_parent_console();
+    }
 
     if cli.list {
         list_devices();
@@ -124,8 +136,7 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
         } else {
             Some(cli.cable.as_ref().unwrap().as_str())
         };
-        let audio =
-            mousemic_rs::audio::AudioOutput::new(device_name, SAMPLE_RATE)?;
+        let audio = mousemic_rs::audio::AudioOutput::new(device_name, SAMPLE_RATE)?;
         log(&format!(
             "输出设备: {}",
             device_name.unwrap_or("(系统默认扬声器)")
@@ -146,28 +157,129 @@ fn run_headless(cli: &Cli) -> anyhow::Result<()> {
         );
         let mut bridge = Bridge::new(&cfg, &log)?;
         let noop_battery = |_: u8, _: bool| {};
-        bridge.run(&mut sink, &|| (0usize, 0usize), &stop, true, &log, &noop_battery)?;
+        bridge.run(
+            &mut sink,
+            &|| (0usize, 0usize),
+            &stop,
+            true,
+            &log,
+            &noop_battery,
+        )?;
     } else if let Some(path) = &cli.file {
-        let mut wav = WavWriter::new(path, SAMPLE_RATE, 1)?;
-        log(&format!("录音到: {}", path));
         if let Some(hk) = &cli.hotkey {
             log(&format!("联动热键: {} [{}]", hk, cli.driver));
         }
-        log("按住鼠标语音键开始说话, Ctrl+C 结束。");
+        log("按住鼠标语音键录音, Ctrl+C 结束。");
         let stop = install_ctrl_c();
-        let mut sink = |s: &[i16]| {
-            let _ = wav.write_samples(s);
-        };
         let cfg = bridge_config("file", "CABLE Input", &cli.hotkey, &cli.driver);
         let mut bridge = Bridge::new(&cfg, &log)?;
+        // 桥接初始化成功后才创建文件, 且绝不覆盖已有录音 (create_new)。
+        let wav = Arc::new(std::sync::Mutex::new(WavWriter::new(path, SAMPLE_RATE, 1)?));
+        log(&format!("录音到: {}", path));
+        let write_failed = Arc::new(AtomicBool::new(false));
+        let sink = {
+            let wav = wav.clone();
+            let write_failed = write_failed.clone();
+            let stop_flag = stop.clone();
+            move |s: &[i16]| {
+                if write_failed.load(Ordering::SeqCst) {
+                    return;
+                }
+                let mut w = wav.lock().unwrap();
+                if let Err(e) = w.write_samples(s) {
+                    write_failed.store(true, Ordering::SeqCst);
+                    // 磁盘满/设备拔出: 立刻停止桥接, 收尾仍会回填已写数据的头。
+                    stop_flag.store(true, Ordering::SeqCst);
+                    eprintln!("WAV 写入失败: {}", e);
+                }
+            }
+        };
+        let mut sink = sink;
         let noop_battery = |_: u8, _: bool| {};
-        let r = bridge.run(&mut sink, &|| (0usize, 0usize), &stop, true, &log, &noop_battery);
-        wav.close()?;
-        log(&format!("已保存 {}", path));
+        let r = bridge.run(
+            &mut sink,
+            &|| (0usize, 0usize),
+            &stop,
+            true,
+            &log,
+            &noop_battery,
+        );
+        // 无论桥接结果如何都完成 WAV 收尾 (回填 data_len), 再汇报各自错误。
+        let wav_close = match Arc::try_unwrap(wav) {
+            Ok(mutex) => match mutex.into_inner() {
+                Ok(w) => w
+                    .close()
+                    .map_err(|e| anyhow::anyhow!("WAV 收尾失败: {}", e)),
+                Err(_) => Err(anyhow::anyhow!("WAV 写入端未释放")),
+            },
+            Err(_) => Err(anyhow::anyhow!("WAV 写入端未释放")),
+        };
+        if let Err(e) = &wav_close {
+            eprintln!("错误: {}", e);
+        } else if !write_failed.load(Ordering::SeqCst) {
+            log(&format!("已保存 {}", path));
+        }
         r?;
+        wav_close?;
     }
     Ok(())
 }
+
+/// 发布版 (GUI 子系统) 从控制台启动 CLI 时挂回父控制台, 恢复 stdout/stderr
+/// 与 Ctrl+C 信号。双击启动时无父控制台, 静默跳过。
+#[cfg(windows)]
+fn attach_parent_console() {
+    use std::sync::atomic::AtomicBool;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    static ATTACHED: AtomicBool = AtomicBool::new(false);
+    if ATTACHED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return;
+        }
+        let conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let Ok(console) = CreateFileW(
+            PCWSTR(conout.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0),
+            None,
+            FILE_CREATION_DISPOSITION(OPEN_EXISTING.0),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        ) else {
+            return;
+        };
+        let inherited_stdout = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or_default();
+        let inherited_stderr = GetStdHandle(STD_ERROR_HANDLE).unwrap_or_default();
+        // 启动时已带有效 std 句柄 (重定向到管道/文件) 的保持不动;
+        // 只有交互式控制台启动 (GUI 子系统拿到的是无效句柄) 才指向 CONOUT$。
+        let mut took_console = false;
+        if inherited_stdout.is_invalid() {
+            took_console |= SetStdHandle(STD_OUTPUT_HANDLE, console).is_ok();
+        }
+        if inherited_stderr.is_invalid() {
+            took_console |= SetStdHandle(STD_ERROR_HANDLE, console).is_ok();
+        }
+        if !took_console {
+            let _ = CloseHandle(console);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
 
 fn bridge_config(mode: &str, cable_device: &str, hotkey: &Option<String>, driver: &str) -> Config {
     let hotkey_forward = hotkey.clone();
@@ -211,10 +323,12 @@ fn list_devices() {
 fn install_ctrl_c() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
-    ctrlc::set_handler(move || {
+    if let Err(e) = ctrlc::set_handler(move || {
         s.store(true, Ordering::SeqCst);
-    })
-    .ok(); // 忽略重复安装错误
+    }) {
+        // 注册失败 (如重复安装) 时提示; 桥接仍可运行, 但需结束进程强退。
+        eprintln!("警告: Ctrl+C 处理注册失败 ({})", e);
+    }
     stop
 }
 
@@ -222,8 +336,8 @@ fn install_ctrl_c() -> Arc<AtomicBool> {
 // 极简 WAV 写出 (16-bit PCM, 单声道)。避免引入额外依赖。
 // ----------------------------------------------------------------------------
 
-use std::io::{Seek, SeekFrom, Write};
 use std::fs::File;
+use std::io::{Seek, SeekFrom, Write};
 
 struct WavWriter {
     f: File,
@@ -234,23 +348,38 @@ struct WavWriter {
 
 impl WavWriter {
     fn new(path: &str, sample_rate: u32, channels: u16) -> std::io::Result<Self> {
-        let mut f = File::create(path)?;
+        // create_new: 已存在的文件报错而不是截断——绝不覆盖用户此前的录音。
+        let mut f = File::options().write(true).create_new(true).open(path)?;
         // 先写占位头 (data_len=0), 关闭时回填真实长度。
         f.write_all(&wav_header(sample_rate, channels, 0))?;
-        Ok(WavWriter { f, data_len: 0, sample_rate, channels })
+        Ok(WavWriter {
+            f,
+            data_len: 0,
+            sample_rate,
+            channels,
+        })
     }
 
     fn write_samples(&mut self, samples: &[i16]) -> std::io::Result<()> {
+        // RIFF 尺寸字段是 u32; 4GB 之后写入必然产生非法文件, 直接报错停录。
+        let bytes = samples
+            .len()
+            .checked_mul(2)
+            .filter(|bytes| self.data_len as u64 + *bytes as u64 <= u32::MAX as u64)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "WAV 超过 4GB 上限")
+            })?;
+        self.data_len += bytes as u32;
         for &s in samples {
             self.f.write_all(&s.to_le_bytes())?;
-            self.data_len += 2;
         }
         Ok(())
     }
 
     fn close(mut self) -> std::io::Result<()> {
         self.f.seek(SeekFrom::Start(0))?;
-        self.f.write_all(&wav_header(self.sample_rate, self.channels, self.data_len))?;
+        self.f
+            .write_all(&wav_header(self.sample_rate, self.channels, self.data_len))?;
         self.f.flush()
     }
 }

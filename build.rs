@@ -25,7 +25,11 @@ fn main() {
         b.flag_if_supported(f);
     }
     // GCC/Clang: 同样抑制, 保持构建干净。
-    for f in ["-Wno-conversion", "-Wno-unused-parameter", "-Wno-sign-compare"] {
+    for f in [
+        "-Wno-conversion",
+        "-Wno-unused-parameter",
+        "-Wno-sign-compare",
+    ] {
         b.flag_if_supported(f);
     }
 

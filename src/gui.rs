@@ -17,17 +17,17 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use native_windows_gui as nwg;
 use native_windows_derive as nwd;
+use native_windows_gui as nwg;
 use nwd::NwgUi;
 use nwg::NativeUi;
 
-use cpal::traits::{DeviceTrait, HostTrait};
 use crate::audio::AudioOutput;
 use crate::bridge::Bridge;
 use crate::config::{self, Config};
 use crate::dialog::show_error_box;
 use crate::{hid, single_instance, SAMPLE_RATE};
+use cpal::traits::{DeviceTrait, HostTrait};
 
 /// 热键下拉框里的"仅语音"特殊项: 启用该键 AI(长按触发麦克风)但不注入任何按键。
 const VOICE_ONLY: &str = "仅语音(无热键)";
@@ -44,11 +44,45 @@ fn split_hotkey_sel(sel: &str) -> (Option<String>, bool) {
     }
 }
 
-/// 后台线程 → GUI 主线程的通道消息。
+/// 自动发送输入始终转为有限的 0..=10 秒; 无效输入沿用上次有效值。
+fn parse_auto_enter_delay(text: &str, previous: f64) -> f64 {
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|d| d.is_finite())
+        .or_else(|| previous.is_finite().then_some(previous))
+        .unwrap_or(0.5)
+        .clamp(0.0, 10.0)
+}
+
+/// 从控件采集的值; 配置转换不依赖窗口, 便于无 GUI 回归测试。
+struct ConfigSelections {
+    cable_device: String,
+    hotkey_fwd: String,
+    hotkey_bwd: String,
+    driver: String,
+    auto_enter: bool,
+    auto_enter_mode: Option<String>,
+    auto_enter_delay: String,
+}
+
+/// 后台线程 → GUI 主线程的通道消息。运行状态/电量只对所属代次有效。
 enum Msg {
     Log(String),
-    Running(bool),
-    Battery(u8, bool), // 电量%, 是否充电中
+    Running {
+        generation: u64,
+        running: bool,
+    },
+    Battery {
+        generation: u64,
+        pct: u8,
+        charging: bool,
+    },
+}
+
+struct RunningUpdate {
+    was_running: bool,
+    finished_thread: Option<JoinHandle<()>>,
 }
 
 /// 运行态 (与 UI 控件分离, 用 RefCell 在 `&self` 回调里修改)。
@@ -63,9 +97,13 @@ struct AppState {
     minimize_to_tray: bool,
     auto_start_service: bool,
     debug_log: bool,
+    wired_pids: Vec<String>,
+    wireless_pids: Vec<String>,
 
-    // 运行态
+    // 运行态: 主动停止/自然结束即作废 active_generation, 丢弃迟到消息。
     running: bool,
+    run_generation: u64,
+    active_generation: Option<u64>,
     stop: Option<Arc<AtomicBool>>,
     bridge_thread: Option<JoinHandle<()>>,
 
@@ -112,7 +150,11 @@ impl Default for AppState {
             minimize_to_tray: false,
             auto_start_service: false,
             debug_log: false,
+            wired_pids: Vec::new(),
+            wireless_pids: Vec::new(),
             running: false,
+            run_generation: 0,
+            active_generation: None,
             stop: None,
             bridge_thread: None,
             log_lines: Vec::new(),
@@ -130,6 +172,111 @@ impl Default for AppState {
             battery_low_notified: false,
             battery_full_notified: false,
         }
+    }
+}
+
+impl AppState {
+    fn load_config(&mut self, cfg: &Config) {
+        self.mode_play = cfg.mode == "play";
+        self.cable_device = cfg.cable_device.clone();
+        self.hotkey_fwd = match (&cfg.hotkey_forward, cfg.ai_fwd) {
+            (Some(h), _) => h.clone(),
+            (None, true) => VOICE_ONLY.to_string(),
+            (None, false) => "无".to_string(),
+        };
+        self.hotkey_bwd = match (&cfg.hotkey_backward, cfg.ai_bwd) {
+            (Some(h), _) => h.clone(),
+            (None, true) => VOICE_ONLY.to_string(),
+            (None, false) => "无".to_string(),
+        };
+        self.driver = cfg.driver.clone();
+        self.autostart_on = cfg.autostart;
+        self.minimize_to_tray = cfg.minimize_to_tray;
+        self.auto_start_service = cfg.auto_start_service;
+        self.auto_enter = cfg.auto_enter;
+        self.auto_enter_mode = cfg.auto_enter_mode.clone();
+        self.auto_enter_delay = parse_auto_enter_delay("", cfg.auto_enter_delay);
+        self.typeless_fwd = cfg.typeless_fwd;
+        self.typeless_bwd = cfg.typeless_bwd;
+        self.wired_pids = cfg.wired_pids.clone();
+        self.wireless_pids = cfg.wireless_pids.clone();
+    }
+
+    fn config_from_selections(&self, selections: ConfigSelections) -> Config {
+        let (hotkey_forward, ai_fwd) = split_hotkey_sel(&selections.hotkey_fwd);
+        let (hotkey_backward, ai_bwd) = split_hotkey_sel(&selections.hotkey_bwd);
+        Config {
+            mode: if self.mode_play {
+                "play".to_string()
+            } else {
+                "cable".to_string()
+            },
+            cable_device: selections.cable_device,
+            hotkey_forward,
+            hotkey_backward,
+            ai_fwd,
+            ai_bwd,
+            driver: selections.driver,
+            minimize_to_tray: self.minimize_to_tray,
+            auto_start_service: self.auto_start_service,
+            wired_pids: self.wired_pids.clone(),
+            wireless_pids: self.wireless_pids.clone(),
+            autostart: self.autostart_on,
+            auto_enter: selections.auto_enter,
+            auto_enter_mode: if selections.auto_enter_mode.as_deref() == Some("Ctrl+Enter") {
+                "ctrl_enter".to_string()
+            } else {
+                "enter".to_string()
+            },
+            auto_enter_delay: parse_auto_enter_delay(
+                &selections.auto_enter_delay,
+                self.auto_enter_delay,
+            ),
+            typeless_fwd: self.typeless_fwd,
+            typeless_bwd: self.typeless_bwd,
+        }
+    }
+
+    fn begin_run(&mut self) -> Option<(u64, Arc<AtomicBool>)> {
+        if self.running || self.active_generation.is_some() || self.bridge_thread.is_some() {
+            return None;
+        }
+        self.run_generation = self.run_generation.checked_add(1)?;
+        let generation = self.run_generation;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.active_generation = Some(generation);
+        self.running = true;
+        self.stop = Some(stop.clone());
+        Some((generation, stop))
+    }
+
+    fn apply_running(&mut self, generation: u64, running: bool) -> Option<RunningUpdate> {
+        if self.active_generation != Some(generation) {
+            return None;
+        }
+        let was_running = self.running;
+        self.running = running;
+        let finished_thread = if running {
+            None
+        } else {
+            self.active_generation = None;
+            self.stop = None;
+            self.bridge_thread.take()
+        };
+        Some(RunningUpdate {
+            was_running,
+            finished_thread,
+        })
+    }
+
+    fn request_stop(&mut self) -> Option<JoinHandle<()>> {
+        // 先作废消息, 再通知线程停止; join 由调用方在释放状态借用后执行。
+        self.active_generation = None;
+        self.running = false;
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        self.bridge_thread.take()
     }
 }
 
@@ -219,6 +366,7 @@ pub struct GuiApp {
     #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
     chk_auto_enter: nwg::CheckBox,
     #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 194))]
+    #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
     cb_auto_enter_mode: nwg::ComboBox<String>,
     #[nwg_control(parent: settings_frame, text: "延迟", position: (220, 197), size: (38, 22))]
     lbl_auto_delay: nwg::Label,
@@ -244,7 +392,7 @@ pub struct GuiApp {
     #[nwg_control(parent: window, text: "▶ 启动", position: (20, 568), size: (130, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::start_bridge] )]
     btn_start: nwg::Button,
-    #[nwg_control(parent: window, text: "■ 停止", position: (160, 568), size: (130, 36))]  
+    #[nwg_control(parent: window, text: "■ 停止", position: (160, 568), size: (130, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::stop_bridge] )]
     btn_stop: nwg::Button,
     #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 568), size: (140, 36))]
@@ -279,8 +427,7 @@ pub struct GuiApp {
     m_exit: nwg::MenuItem,
 
     // ---- 计时器: 轮询后台通道 (100ms) ----
-    #[nwg_control(parent: window)]
-    #[nwg_control(parent: window, interval: 200)]
+    #[nwg_control(parent: window, interval: std::time::Duration::from_millis(200))]
     #[nwg_events( OnTimerTick: [GuiApp::on_tick] )]
     timer: nwg::AnimationTimer,
 }
@@ -289,28 +436,7 @@ impl GuiApp {
     /// 在 build_ui 之前初始化运行态 (读配置, 建通道, 准备下拉框数据)。
     fn pre_build(state: &mut AppState, autostart: bool) {
         let cfg = Config::load();
-        state.mode_play = cfg.mode == "play";
-        state.cable_device = cfg.cable_device.clone();
-        // 下拉选中项 = 绑定的热键名; 未绑定但开了仅语音 → "仅语音(无热键)"; 否则 "无"。
-        state.hotkey_fwd = match (&cfg.hotkey_forward, cfg.ai_fwd) {
-            (Some(h), _) => h.clone(),
-            (None, true) => VOICE_ONLY.to_string(),
-            (None, false) => "无".to_string(),
-        };
-        state.hotkey_bwd = match (&cfg.hotkey_backward, cfg.ai_bwd) {
-            (Some(h), _) => h.clone(),
-            (None, true) => VOICE_ONLY.to_string(),
-            (None, false) => "无".to_string(),
-        };
-        state.driver = cfg.driver.clone();
-        state.autostart_on = cfg.autostart;
-        state.minimize_to_tray = cfg.minimize_to_tray;
-        state.auto_start_service = cfg.auto_start_service;
-        state.auto_enter = cfg.auto_enter;
-        state.auto_enter_mode = cfg.auto_enter_mode.clone();
-        state.auto_enter_delay = cfg.auto_enter_delay;
-        state.typeless_fwd = cfg.typeless_fwd;
-        state.typeless_bwd = cfg.typeless_bwd;
+        state.load_config(&cfg);
 
         // 热键下拉框数据 (无 + 仅语音 + HOTKEY_NAMES)
         let mut hk = vec!["无".to_string(), VOICE_ONLY.to_string()];
@@ -339,11 +465,19 @@ impl GuiApp {
 
         // 填充下拉框
         self.cb_hotkey_fwd.set_collection(st.hotkey_items.clone());
-        let fwd_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_fwd).unwrap_or(0);
+        let fwd_idx = st
+            .hotkey_items
+            .iter()
+            .position(|h| h == &st.hotkey_fwd)
+            .unwrap_or(0);
         self.cb_hotkey_fwd.set_selection(Some(fwd_idx));
 
         self.cb_hotkey_bwd.set_collection(st.hotkey_items.clone());
-        let bwd_idx = st.hotkey_items.iter().position(|h| h == &st.hotkey_bwd).unwrap_or(0);
+        let bwd_idx = st
+            .hotkey_items
+            .iter()
+            .position(|h| h == &st.hotkey_bwd)
+            .unwrap_or(0);
         self.cb_hotkey_bwd.set_selection(Some(bwd_idx));
 
         self.cb_driver.set_collection(st.driver_items.clone());
@@ -373,32 +507,69 @@ impl GuiApp {
             v
         };
         self.cb_cable.set_collection(cable_items.clone());
-        let cable_idx = cable_items.iter().position(|d| d == &st.cable_device).unwrap_or(0);
+        let cable_idx = cable_items
+            .iter()
+            .position(|d| d == &st.cable_device)
+            .unwrap_or(0);
         self.cb_cable.set_selection(Some(cable_idx));
         self.cb_cable.set_enabled(!st.mode_play);
 
         // 单选按钮: 同步 mode_play (两个都必须显式设, nwg 不会自动互斥)
         if st.mode_play {
             self.rb_play.set_check_state(nwg::RadioButtonState::Checked);
-            self.rb_cable.set_check_state(nwg::RadioButtonState::Unchecked);
+            self.rb_cable
+                .set_check_state(nwg::RadioButtonState::Unchecked);
         } else {
-            self.rb_cable.set_check_state(nwg::RadioButtonState::Checked);
-            self.rb_play.set_check_state(nwg::RadioButtonState::Unchecked);
+            self.rb_cable
+                .set_check_state(nwg::RadioButtonState::Checked);
+            self.rb_play
+                .set_check_state(nwg::RadioButtonState::Unchecked);
         }
 
         // 复选框
-        self.chk_autostart.set_check_state(if st.autostart_on { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
-        self.chk_minimize.set_check_state(if st.minimize_to_tray { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
-        self.chk_autostart_svc.set_check_state(if st.auto_start_service { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
+        self.chk_autostart.set_check_state(if st.autostart_on {
+            nwg::CheckBoxState::Checked
+        } else {
+            nwg::CheckBoxState::Unchecked
+        });
+        self.chk_minimize.set_check_state(if st.minimize_to_tray {
+            nwg::CheckBoxState::Checked
+        } else {
+            nwg::CheckBoxState::Unchecked
+        });
+        self.chk_autostart_svc
+            .set_check_state(if st.auto_start_service {
+                nwg::CheckBoxState::Checked
+            } else {
+                nwg::CheckBoxState::Unchecked
+            });
 
         // 自动回车
-        self.chk_auto_enter.set_check_state(if st.auto_enter { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
-        self.cb_auto_enter_mode.set_collection(vec!["Enter".to_string(), "Ctrl+Enter".to_string()]);
-        let ae_idx = if st.auto_enter_mode == "ctrl_enter" { 1 } else { 0 };
+        self.chk_auto_enter.set_check_state(if st.auto_enter {
+            nwg::CheckBoxState::Checked
+        } else {
+            nwg::CheckBoxState::Unchecked
+        });
+        self.cb_auto_enter_mode
+            .set_collection(vec!["Enter".to_string(), "Ctrl+Enter".to_string()]);
+        let ae_idx = if st.auto_enter_mode == "ctrl_enter" {
+            1
+        } else {
+            0
+        };
         self.cb_auto_enter_mode.set_selection(Some(ae_idx));
-        self.txt_auto_delay.set_text(&format!("{}", st.auto_enter_delay));
-        self.chk_typeless_fwd.set_check_state(if st.typeless_fwd { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
-        self.chk_typeless_bwd.set_check_state(if st.typeless_bwd { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked });
+        self.txt_auto_delay
+            .set_text(&format!("{}", st.auto_enter_delay));
+        self.chk_typeless_fwd.set_check_state(if st.typeless_fwd {
+            nwg::CheckBoxState::Checked
+        } else {
+            nwg::CheckBoxState::Unchecked
+        });
+        self.chk_typeless_bwd.set_check_state(if st.typeless_bwd {
+            nwg::CheckBoxState::Checked
+        } else {
+            nwg::CheckBoxState::Unchecked
+        });
 
         // CBS_DROPDOWNLIST 自带下拉箭头, 不再手动 dropdown(true) 避免启动时弹出列表
 
@@ -470,15 +641,27 @@ impl GuiApp {
 
     // ---------- 设置变更 ----------
 
-    fn on_mode_play(&self) { self.set_mode(true); }
-    fn on_mode_cable(&self) { self.set_mode(false); }
+    fn on_mode_play(&self) {
+        self.set_mode(true);
+    }
+    fn on_mode_cable(&self) {
+        self.set_mode(false);
+    }
 
     fn set_mode(&self, play: bool) {
         // nwg RadioButton 未设 GROUP 标志, 不会自动互斥;
         // 必须显式同步两个单选钮, 否则点击后旧按钮仍保持勾选, 且"虚拟麦克风"
         // 永远无法生效 (旧代码只读 rb_play 状态)。
-        self.rb_play.set_check_state(if play { nwg::RadioButtonState::Checked } else { nwg::RadioButtonState::Unchecked });
-        self.rb_cable.set_check_state(if play { nwg::RadioButtonState::Unchecked } else { nwg::RadioButtonState::Checked });
+        self.rb_play.set_check_state(if play {
+            nwg::RadioButtonState::Checked
+        } else {
+            nwg::RadioButtonState::Unchecked
+        });
+        self.rb_cable.set_check_state(if play {
+            nwg::RadioButtonState::Unchecked
+        } else {
+            nwg::RadioButtonState::Checked
+        });
         {
             let mut st = self.state.borrow_mut();
             st.mode_play = play;
@@ -499,9 +682,21 @@ impl GuiApp {
 
     fn on_autostart_change(&self) {
         let on = self.chk_autostart.check_state() == nwg::CheckBoxState::Checked;
-        let _ = config::set_autostart(on);
+        if let Err(e) = config::set_autostart(on) {
+            let previous = self.state.borrow().autostart_on;
+            self.chk_autostart.set_check_state(if previous {
+                nwg::CheckBoxState::Checked
+            } else {
+                nwg::CheckBoxState::Unchecked
+            });
+            self.append_log(&format!("开机自启设置失败: {}", e));
+            return;
+        }
         self.state.borrow_mut().autostart_on = on;
-        self.append_log(&format!("开机自启: {}", if on { "已开启" } else { "已关闭" }));
+        self.append_log(&format!(
+            "开机自启: {}",
+            if on { "已开启" } else { "已关闭" }
+        ));
         self.persist_config();
     }
 
@@ -509,12 +704,7 @@ impl GuiApp {
         let mut st = self.state.borrow_mut();
         st.minimize_to_tray = self.chk_minimize.check_state() == nwg::CheckBoxState::Checked;
         st.auto_start_service = self.chk_autostart_svc.check_state() == nwg::CheckBoxState::Checked;
-        // 自动回车
-        st.auto_enter = self.chk_auto_enter.check_state() == nwg::CheckBoxState::Checked;
-        st.auto_enter_mode = if self.cb_auto_enter_mode.selection_string().as_deref() == Some("Ctrl+Enter") { "ctrl_enter".to_string() } else { "enter".to_string() };
-        if let Ok(d) = self.txt_auto_delay.text().parse::<f64>() {
-            st.auto_enter_delay = d.clamp(0.0, 10.0);
-        }
+        // 自动发送由 current_config 统一读取, 不依赖变更事件先后顺序。
         st.typeless_fwd = self.chk_typeless_fwd.check_state() == nwg::CheckBoxState::Checked;
         st.typeless_bwd = self.chk_typeless_bwd.check_state() == nwg::CheckBoxState::Checked;
         drop(st);
@@ -569,12 +759,32 @@ impl GuiApp {
                 msgs.push(m);
             }
             drop(st);
-            let mut running_changed = None;
             for m in msgs {
                 match m {
                     Msg::Log(line) => self.append_log(&line),
-                    Msg::Running(r) => running_changed = Some(r),
-                    Msg::Battery(pct, charging) => {
+                    Msg::Running {
+                        generation,
+                        running,
+                    } => {
+                        let update = self.state.borrow_mut().apply_running(generation, running);
+                        if let Some(update) = update {
+                            if let Some(handle) = update.finished_thread {
+                                let _ = handle.join();
+                            }
+                            if !running && update.was_running {
+                                self.append_log("桥接已停止。");
+                            }
+                            self.update_run_state_ui(running);
+                        }
+                    }
+                    Msg::Battery {
+                        generation,
+                        pct,
+                        charging,
+                    } => {
+                        if self.state.borrow().active_generation != Some(generation) {
+                            continue;
+                        }
                         let txt = if charging {
                             format!("电量: {}% 充电中", pct)
                         } else {
@@ -585,23 +795,15 @@ impl GuiApp {
                     }
                 }
             }
-            if let Some(r) = running_changed {
-                let was_running = self.state.borrow().running;
-                self.state.borrow_mut().running = r;
-                if !r {
-                    self.state.borrow_mut().stop = None;
-                    // 主动停止时 stop_bridge 已打过日志; 这里只在后台线程自行退出时补一条
-                    if was_running {
-                        self.append_log("桥接已停止。");
-                    }
-                }
-                self.update_run_state_ui(r);
-            }
         }
     }
 
     fn update_run_state_ui(&self, running: bool) {
-        self.lbl_status.set_text(if running { "● 运行中" } else { "● 已停止" });
+        self.lbl_status.set_text(if running {
+            "● 运行中"
+        } else {
+            "● 已停止"
+        });
         self.btn_start.set_enabled(!running);
         self.btn_stop.set_enabled(running);
     }
@@ -639,8 +841,10 @@ impl GuiApp {
         for (log_line, title, body) in actions {
             self.append_log(&log_line);
             // 托盘气泡提醒 (无需注册 AUMID, 可靠)
-            let flags = nwg::TrayNotificationFlags::INFO_ICON | nwg::TrayNotificationFlags::LARGE_ICON;
-            self.tray.show(&body, Some(&title), Some(flags), Some(&self.icon));
+            let flags =
+                nwg::TrayNotificationFlags::INFO_ICON | nwg::TrayNotificationFlags::LARGE_ICON;
+            self.tray
+                .show(&body, Some(&title), Some(flags), Some(&self.icon));
         }
     }
 
@@ -663,8 +867,8 @@ impl GuiApp {
 
     /// 把日志框滚动到最后一行 (EM_LINESCROLL, 保证新日志可见)。
     fn scroll_log_to_bottom(&self) {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
         use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-        use windows::Win32::Foundation::{WPARAM, LPARAM};
         const EM_GETLINECOUNT: u32 = 0x00BA;
         const EM_LINESCROLL: u32 = 0x00B6;
         if let Some(raw) = self.log_box.handle.hwnd() {
@@ -732,7 +936,14 @@ impl GuiApp {
                 }
             }
         }
-        items.push(("VB-CABLE".to_string(), if found_cable { "已安装".into() } else { "未检测到".into() }));
+        items.push((
+            "VB-CABLE".to_string(),
+            if found_cable {
+                "已安装".into()
+            } else {
+                "未检测到".into()
+            },
+        ));
 
         // Interception 驱动 (可选) — 检查 DLL + 内核驱动
         let mut dll = false;
@@ -747,12 +958,11 @@ impl GuiApp {
             dll = true;
         }
         let driver = {
-            use windows::Win32::Storage::FileSystem::{
-                CreateFileW, FILE_SHARE_MODE, FILE_CREATION_DISPOSITION,
-                FILE_FLAGS_AND_ATTRIBUTES,
-            };
-            use windows::Win32::Foundation::{CloseHandle, GENERIC_READ};
             use windows::core::PCWSTR;
+            use windows::Win32::Foundation::{CloseHandle, GENERIC_READ};
+            use windows::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
+            };
             let dev: Vec<u16> = "\\\\.\\interception00\0".encode_utf16().collect();
             unsafe {
                 match CreateFileW(
@@ -764,15 +974,23 @@ impl GuiApp {
                     FILE_FLAGS_AND_ATTRIBUTES(0),
                     None,
                 ) {
-                    Ok(h) => { let _ = CloseHandle(h); true }
+                    Ok(h) => {
+                        let _ = CloseHandle(h);
+                        true
+                    }
                     Err(_) => false,
                 }
             }
         };
-        let status = if driver && dll { "已安装".into() }
-            else if driver { "缺 DLL".into() }
-            else if dll { "缺驱动".into() }
-            else { "未安装".into() };
+        let status = if driver && dll {
+            "已安装".into()
+        } else if driver {
+            "缺 DLL".into()
+        } else if dll {
+            "缺驱动".into()
+        } else {
+            "未安装".into()
+        };
         items.push(("Interception".to_string(), status));
 
         let mut s = String::new();
@@ -812,16 +1030,30 @@ impl GuiApp {
     }
 
     fn install_deps(&self) {
-        use windows::Win32::UI::Shell::ShellExecuteW;
-        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, SHOW_WINDOW_CMD, MB_YESNO, MB_OK, MB_ICONINFORMATION, IDYES};
         use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, IDYES, MB_ICONINFORMATION, MB_OK, MB_YESNO, SHOW_WINDOW_CMD,
+        };
 
         let open_url = |url: &str| {
             let u: Vec<u16> = format!("{}\0", url).encode_utf16().collect();
-            unsafe { let _ = ShellExecuteW(None, None, PCWSTR(u.as_ptr()), None, None, SHOW_WINDOW_CMD(5)); }
+            unsafe {
+                let _ = ShellExecuteW(
+                    None,
+                    None,
+                    PCWSTR(u.as_ptr()),
+                    None,
+                    None,
+                    SHOW_WINDOW_CMD(5),
+                );
+            }
         };
 
-        let msg = |t: &str, b: &str, flags: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE| -> bool {
+        let msg = |t: &str,
+                   b: &str,
+                   flags: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE|
+         -> bool {
             let tv: Vec<u16> = format!("{}\0", t).encode_utf16().collect();
             let bv: Vec<u16> = format!("{}\0", b).encode_utf16().collect();
             unsafe { MessageBoxW(None, PCWSTR(bv.as_ptr()), PCWSTR(tv.as_ptr()), flags) == IDYES }
@@ -833,10 +1065,18 @@ impl GuiApp {
             MB_OK | MB_ICONINFORMATION);
 
         // 逐项询问是否打开链接
-        if msg("VB-CABLE", "在浏览器中打开 VB-CABLE 下载页?", MB_YESNO | MB_ICONINFORMATION) {
+        if msg(
+            "VB-CABLE",
+            "在浏览器中打开 VB-CABLE 下载页?",
+            MB_YESNO | MB_ICONINFORMATION,
+        ) {
             open_url("https://vb-audio.com/Cable/index.htm");
         }
-        if msg("Interception", "在浏览器中打开 Interception 项目页?\n(非必须, 仅当模拟按键异常时需要)", MB_YESNO | MB_ICONINFORMATION) {
+        if msg(
+            "Interception",
+            "在浏览器中打开 Interception 项目页?\n(非必须, 仅当模拟按键异常时需要)",
+            MB_YESNO | MB_ICONINFORMATION,
+        ) {
             open_url("https://github.com/oblitum/Interception");
         }
     }
@@ -846,42 +1086,41 @@ impl GuiApp {
     fn current_config(&self) -> Config {
         let st = self.state.borrow();
         let hotkey_fwd = self
-            .cb_hotkey_fwd.selection()
+            .cb_hotkey_fwd
+            .selection()
             .and_then(|i| st.hotkey_items.get(i).cloned())
             .unwrap_or_else(|| "无".to_string());
         let hotkey_bwd = self
-            .cb_hotkey_bwd.selection()
+            .cb_hotkey_bwd
+            .selection()
             .and_then(|i| st.hotkey_items.get(i).cloned())
             .unwrap_or_else(|| "无".to_string());
         let driver = self
-            .cb_driver.selection()
+            .cb_driver
+            .selection()
             .and_then(|i| st.driver_items.get(i).cloned())
             .unwrap_or_else(|| "sendinput".to_string());
-        let (hotkey_forward, ai_fwd) = split_hotkey_sel(&hotkey_fwd);
-        let (hotkey_backward, ai_bwd) = split_hotkey_sel(&hotkey_bwd);
-        Config {
-            mode: if st.mode_play { "play".to_string() } else { "cable".to_string() },
-            cable_device: self.cb_cable.selection_string().unwrap_or_else(|| st.cable_device.clone()),
-            hotkey_forward,
-            hotkey_backward,
-            ai_fwd,
-            ai_bwd,
+        st.config_from_selections(ConfigSelections {
+            cable_device: self
+                .cb_cable
+                .selection_string()
+                .unwrap_or_else(|| st.cable_device.clone()),
+            hotkey_fwd,
+            hotkey_bwd,
             driver,
-            minimize_to_tray: st.minimize_to_tray,
-            auto_start_service: st.auto_start_service,
-            wired_pids: vec![],
-            wireless_pids: vec![],
-            autostart: st.autostart_on,
-            auto_enter: st.auto_enter,
-            auto_enter_mode: st.auto_enter_mode.clone(),
-            auto_enter_delay: st.auto_enter_delay,
-            typeless_fwd: st.typeless_fwd,
-            typeless_bwd: st.typeless_bwd,
-        }
+            auto_enter: self.chk_auto_enter.check_state() == nwg::CheckBoxState::Checked,
+            auto_enter_mode: self.cb_auto_enter_mode.selection_string(),
+            auto_enter_delay: self.txt_auto_delay.text(),
+        })
     }
 
-    fn persist_config(&self) {
-        let _ = self.current_config().save();
+    fn persist_config(&self) -> Config {
+        let cfg = self.current_config();
+        self.state.borrow_mut().auto_enter_delay = cfg.auto_enter_delay;
+        if let Err(e) = cfg.save() {
+            self.append_log(&format!("配置保存失败 (本次设置仍可用于桥接): {}", e));
+        }
+        cfg
     }
 
     // ---------- 桥接启停 ----------
@@ -900,17 +1139,14 @@ impl GuiApp {
             None => return,
         };
 
-        // 持久化之前把配置写入 Config 里 (没有运行态借用)
-        self.persist_config();
-        let cfg = self.current_config();
+        // 保存与本次启动使用同一份控件快照。
+        let cfg = self.persist_config();
 
-        // 标记运行态、准备停止信号与日志起始行
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
+        let Some((generation, stop)) = self.state.borrow_mut().begin_run() else {
+            return;
+        };
         {
             let mut st = self.state.borrow_mut();
-            st.running = true;
-            st.stop = Some(stop.clone());
             // 键位描述: 绑了热键 → 热键名; 仅语音 → "仅语音"; 都没开 → "禁用"
             let key_desc = |name: &Option<String>, ai: bool| -> String {
                 match (name, ai) {
@@ -929,7 +1165,8 @@ impl GuiApp {
         }
 
         // 刷新 UI (借用仅限此次表达式)
-        self.log_box.set_text(&self.state.borrow().log_lines.join("\r\n"));
+        self.log_box
+            .set_text(&self.state.borrow().log_lines.join("\r\n"));
         self.update_run_state_ui(true);
 
         let handle = std::thread::spawn(move || {
@@ -939,18 +1176,36 @@ impl GuiApp {
             };
             let bat_tx = msg_tx.clone();
             let battery_cb = move |pct: u8, charging: bool| {
-                let _ = bat_tx.send(Msg::Battery(pct, charging));
+                let _ = bat_tx.send(Msg::Battery {
+                    generation,
+                    pct,
+                    charging,
+                });
             };
-            let _ = msg_tx.send(Msg::Running(true));
+            let _ = msg_tx.send(Msg::Running {
+                generation,
+                running: true,
+            });
 
-            let device_name = if cfg.mode == "play" { None } else { Some(cfg.cable_device.as_str()) };
+            let device_name = if cfg.mode == "play" {
+                None
+            } else {
+                Some(cfg.cable_device.as_str())
+            };
             match AudioOutput::new(device_name, SAMPLE_RATE) {
                 Ok(audio) => {
                     log(&format!("音频输出设备: {}", audio.device_name()));
                     let mut sink = |s: &[i16]| audio.push_pcm(s);
                     match Bridge::new(&cfg, &log) {
                         Ok(mut bridge) => {
-                            if let Err(e) = bridge.run(&mut sink, &|| audio.diagnostics(), &stop_clone, debug, &log, &battery_cb) {
+                            if let Err(e) = bridge.run(
+                                &mut sink,
+                                &|| audio.diagnostics(),
+                                &stop,
+                                debug,
+                                &log,
+                                &battery_cb,
+                            ) {
                                 log(&format!("桥接错误: {}", e));
                             }
                         }
@@ -959,27 +1214,21 @@ impl GuiApp {
                 }
                 Err(e) => log(&format!("音频设备错误: {}", e)),
             }
-            let _ = msg_tx.send(Msg::Running(false));
+            let _ = msg_tx.send(Msg::Running {
+                generation,
+                running: false,
+            });
         });
 
         self.state.borrow_mut().bridge_thread = Some(handle);
     }
 
     fn stop_bridge(&self) {
-        let (stop, handle) = {
-            let mut st = self.state.borrow_mut();
-            let stop = st.stop.take();
-            let handle = st.bridge_thread.take();
-            (stop, handle)
-        };
-        if let Some(stop) = &stop {
-            stop.store(true, Ordering::SeqCst);
-        }
-        // 等待桥接线程退出 (确保 disconnect/ai_off 执行完毕)
+        // 作废代次 → 置停止标志 → 释放借用后 join, 迟到的旧代消息全部被丢弃。
+        let handle = self.state.borrow_mut().request_stop();
         if let Some(h) = handle {
             let _ = h.join();
         }
-        self.state.borrow_mut().running = false;
         self.update_run_state_ui(false);
         self.lbl_battery.set_text("电量: --");
         {
@@ -1030,4 +1279,108 @@ pub fn run(autostart: bool) {
     _ui.post_build();
     // _ui 必须保留到 dispatch 结束 (持有 GuiApp 的所有权)。
     nwg::dispatch_thread_events();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_channel() -> AppState {
+        let (tx, rx) = mpsc::channel::<Msg>();
+        AppState {
+            msg_tx: Some(tx),
+            msg_rx: Some(rx),
+            ..AppState::default()
+        }
+    }
+
+    #[test]
+    fn stale_running_false_cannot_clear_new_run_stop() {
+        let mut st = state_with_channel();
+        let (gen1, stop1) = st.begin_run().unwrap();
+
+        // 模拟: 旧线程退出前 UI 已主动停止并重启 (gen2)。
+        st.request_stop();
+        let (gen2, stop2) = st.begin_run().unwrap();
+        assert_ne!(gen1, gen2);
+        assert!(st.running);
+
+        // 旧代 Running(false) 到达: 不得影响新代运行态或停止令牌。
+        assert!(st.apply_running(gen1, false).is_none());
+        assert!(st.running);
+        assert!(!stop2.load(Ordering::SeqCst));
+
+        // 新代 Running(true) 随后到达: 状态保持运行。
+        assert!(st.apply_running(gen2, true).is_some());
+        assert!(st.running);
+
+        // 旧代停止令牌翻转也不得干扰新代。
+        stop1.store(true, Ordering::SeqCst);
+        assert!(!stop2.load(Ordering::SeqCst));
+
+        // 新代正常结束: 返回线程收尾句柄并清空令牌。
+        st.bridge_thread = Some(std::thread::spawn(|| {}));
+        let update = st.apply_running(gen2, false).unwrap();
+        assert!(update.finished_thread.is_some());
+        assert!(!st.running);
+        assert!(st.stop.is_none());
+    }
+
+    #[test]
+    fn request_stop_invalidates_generation_and_signals_worker() {
+        let mut st = state_with_channel();
+        let (_, stop) = st.begin_run().unwrap();
+        st.request_stop();
+        assert!(!st.running);
+        assert!(st.active_generation.is_none());
+        assert!(stop.load(Ordering::SeqCst));
+        // 已停止后不得立刻重启残留状态。
+        assert!(st.begin_run().is_some());
+    }
+
+    #[test]
+    fn begin_run_rejects_concurrent_or_lingering_runs() {
+        let mut st = state_with_channel();
+        assert!(st.begin_run().is_some());
+        assert!(st.begin_run().is_none(), "运行中不得重复启动");
+        st.request_stop();
+        assert!(st.begin_run().is_some(), "完全收尾后允许再次启动");
+    }
+
+    #[test]
+    fn auto_enter_delay_clamps_and_falls_back() {
+        assert_eq!(parse_auto_enter_delay("2", 0.5), 2.0);
+        assert_eq!(parse_auto_enter_delay("99", 0.5), 10.0);
+        assert_eq!(parse_auto_enter_delay("-5", 0.5), 0.0);
+        assert_eq!(parse_auto_enter_delay("abc", 0.5), 0.5);
+        assert_eq!(parse_auto_enter_delay("NaN", 3.0), 3.0);
+        assert_eq!(parse_auto_enter_delay("inf", 0.5), 0.5);
+    }
+
+    #[test]
+    fn config_from_selections_reads_current_controls() {
+        let mut st = state_with_channel();
+        st.wired_pids = vec!["0xED03".to_string()];
+        st.auto_enter_delay = 9.0;
+        let cfg = st.config_from_selections(ConfigSelections {
+            cable_device: "CABLE Input".to_string(),
+            hotkey_fwd: "无".to_string(),
+            hotkey_bwd: "仅语音(无热键)".to_string(),
+            driver: "sendinput".to_string(),
+            auto_enter: true,
+            auto_enter_mode: Some("Ctrl+Enter".to_string()),
+            auto_enter_delay: "0.25".to_string(),
+        });
+        assert_eq!(cfg.hotkey_forward, None);
+        assert!(!cfg.ai_fwd);
+        assert!(cfg.ai_bwd);
+        assert!(cfg.auto_enter);
+        assert_eq!(cfg.auto_enter_mode, "ctrl_enter");
+        assert_eq!(cfg.auto_enter_delay, 0.25);
+        assert_eq!(
+            cfg.wired_pids,
+            vec!["0xED03".to_string()],
+            "手工 PID 配置不得被保存抹除"
+        );
+    }
 }

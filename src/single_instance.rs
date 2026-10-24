@@ -4,10 +4,10 @@
 #[cfg(windows)]
 mod imp {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{BOOL, ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::Foundation::{GetLastError, BOOL, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, IsIconic, SW_RESTORE, SW_SHOW,
+        FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
     };
 
     /// 尝试获取单实例锁。返回 true 表示本进程是第一个实例; false 表示已有实例在运行。
@@ -32,7 +32,9 @@ mod imp {
     pub fn bring_existing_to_front() {
         let class: Vec<u16> = "NativeWindowsGuiWindow\0".encode_utf16().collect();
         // 标题必须与 GUI 标题栏一致 (含版本号), 否则 FindWindowW 精确匹配会失败。
-        let title: Vec<u16> = format!("{}\0", crate::WINDOW_TITLE).encode_utf16().collect();
+        let title: Vec<u16> = format!("{}\0", crate::WINDOW_TITLE)
+            .encode_utf16()
+            .collect();
         unsafe {
             let Ok(hwnd) = FindWindowW(PCWSTR(class.as_ptr()), PCWSTR(title.as_ptr())) else {
                 return;
@@ -53,8 +55,10 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn try_acquire() -> bool { true }
+    pub fn try_acquire() -> bool {
+        true
+    }
     pub fn bring_existing_to_front() {}
 }
 
-pub use imp::{try_acquire, bring_existing_to_front};
+pub use imp::{bring_existing_to_front, try_acquire};

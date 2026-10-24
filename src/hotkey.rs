@@ -13,9 +13,18 @@ use std::path::PathBuf;
 
 /// 可选热键名列表 (供 GUI 下拉 / CLI 校验)。
 pub const HOTKEY_NAMES: &[&str] = &[
-    "L_alt", "R_alt", "R_ctrl", "R_shift",
-    "f9", "f10", "space", "grave", "capslock",
-    "R_alt+space", "R_alt+R_shift", "R_alt+R_ctrl",
+    "L_alt",
+    "R_alt",
+    "R_ctrl",
+    "R_shift",
+    "f9",
+    "f10",
+    "space",
+    "grave",
+    "capslock",
+    "R_alt+space",
+    "R_alt+R_shift",
+    "R_alt+R_ctrl",
 ];
 
 /// 单键名 -> (Set-1 扫描码, 是否扩展键)。与 Python HOTKEYS 表一一对应。
@@ -43,7 +52,11 @@ pub fn hotkey_scans(name: &str) -> Option<Vec<(u8, bool)>> {
     for p in &parts {
         result.push(single_scan(p.trim())?);
     }
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// 兼容旧接口: 单键查询。
@@ -76,7 +89,11 @@ impl HotKey {
             "interception" => Backend::Interception(InterceptionCtx::new()?),
             _ => Backend::SendInput,
         };
-        Ok(HotKey { scans, down: false, backend })
+        Ok(HotKey {
+            scans,
+            down: false,
+            backend,
+        })
     }
 
     /// 按住 (若已按住则忽略)。
@@ -146,7 +163,7 @@ impl Drop for HotKey {
 #[cfg(windows)]
 fn send_scan(scancode: u8, extended: bool, keyup: bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, SendInput, VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, VIRTUAL_KEY,
     };
 
     const F_SCANCODE: u32 = 0x0008;
@@ -174,7 +191,10 @@ fn send_scan(scancode: u8, extended: bool, keyup: bool) {
         },
     };
     unsafe {
-        SendInput(std::slice::from_ref(&input), std::mem::size_of::<INPUT>() as i32);
+        SendInput(
+            std::slice::from_ref(&input),
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 
@@ -188,7 +208,7 @@ fn send_scan(_scancode: u8, _extended: bool, _keyup: bool) {
 pub fn inject_enter() {
     // Enter 扫描码 0x1C, 非扩展键
     send_scan(0x1C, false, false); // 按下
-    send_scan(0x1C, false, true);  // 释放
+    send_scan(0x1C, false, true); // 释放
 }
 
 /// 注入 Ctrl+Enter (按下 Ctrl → 按下 Enter → 释放 Enter → 释放 Ctrl)。
@@ -196,8 +216,8 @@ pub fn inject_enter() {
 pub fn inject_ctrl_enter() {
     send_scan(0x1D, false, false); // Ctrl 按下
     send_scan(0x1C, false, false); // Enter 按下
-    send_scan(0x1C, false, true);  // Enter 释放
-    send_scan(0x1D, false, true);  // Ctrl 释放
+    send_scan(0x1C, false, true); // Enter 释放
+    send_scan(0x1D, false, true); // Ctrl 释放
 }
 
 #[cfg(not(windows))]
@@ -223,8 +243,12 @@ unsafe impl Send for InterceptionCtx {}
 #[cfg(windows)]
 impl InterceptionCtx {
     fn new() -> anyhow::Result<Self> {
-        let lib = load_interception_dll()
-            .map_err(|e| anyhow::anyhow!("找不到 interception.dll: {} (需安装 Interception 驱动并放到 exe 同目录)", e))?;
+        let lib = load_interception_dll().map_err(|e| {
+            anyhow::anyhow!(
+                "找不到 interception.dll: {} (需安装 Interception 驱动并放到 exe 同目录)",
+                e
+            )
+        })?;
 
         type CreateCtx = unsafe extern "C" fn() -> *mut std::os::raw::c_void;
         type IsKb = unsafe extern "C" fn(i32) -> i32;
@@ -237,13 +261,17 @@ impl InterceptionCtx {
         };
         let ctx = unsafe { create() };
         if ctx.is_null() {
-            return Err(anyhow::anyhow!("Interception 上下文创建失败 (驱动未安装或未重启?)"));
+            return Err(anyhow::anyhow!(
+                "Interception 上下文创建失败 (驱动未安装或未重启?)"
+            ));
         }
 
         // 选键盘设备: 优先 AJAZZ 鼠标自带的键盘接口, 否则第一个非虚拟实体键盘。
         let is_kb: libloading::Symbol<IsKb> = unsafe { lib.get(b"interception_is_keyboard")? };
-        let is_invalid: libloading::Symbol<IsInvalid> = unsafe { lib.get(b"interception_is_invalid")? };
-        let get_hwid: libloading::Symbol<GetHwid> = unsafe { lib.get(b"interception_get_hardware_id")? };
+        let is_invalid: libloading::Symbol<IsInvalid> =
+            unsafe { lib.get(b"interception_is_invalid")? };
+        let get_hwid: libloading::Symbol<GetHwid> =
+            unsafe { lib.get(b"interception_get_hardware_id")? };
 
         let mut best = 0i32;
         let mut fallback = 0i32;
@@ -272,7 +300,11 @@ impl InterceptionCtx {
         if device == 0 {
             return Err(anyhow::anyhow!("Interception 找不到可用键盘设备"));
         }
-        Ok(InterceptionCtx { _lib: lib, ctx, device })
+        Ok(InterceptionCtx {
+            _lib: lib,
+            ctx,
+            device,
+        })
     }
 
     fn inject(&self, scancode: u8, extended: bool, keyup: bool) {
