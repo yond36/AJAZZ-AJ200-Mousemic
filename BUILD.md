@@ -3,7 +3,7 @@
 本目录是用 Rust 对原 Python 版 MouseMic（AJAZZ 语音鼠标的 mSBC→PCM 桥接）的完整重写。
 本文记录**已验证可编译/测试/构建**的环境与步骤，并收录编译期踩过的 API 坑，避免重建时重蹈覆辙。
 
-当前版本：**v1.4.7**（与 `Cargo.toml` / `Cargo.lock` 一致）。
+当前版本：**v1.4.8**（与 `Cargo.toml` / `Cargo.lock` 一致）。
 
 ## 1. 先决条件（本机 Windows）
 
@@ -48,9 +48,10 @@ cargo test                             # 含 GUI 的完整测试
 
 编译目标：`x86_64-pc-windows-msvc`。需要 Rust 1.82+。
 
-**测试内容**（共 35 个，全部通过）：
-- 单元测试 10 个：`devices`（PID 白名单）、`hid`（电池解析）、`msbc`（解码常量/空帧/坏帧）、
-  `config`（PID 字符串解析、AI 键启用判定）。
+**测试内容**（默认 GUI 特性共 37 个；无 GUI 特性共 31 个，全部通过）：
+- 默认特性含 35 个单元测试：设备与 HID 匹配、激活取消、mSBC 坏帧与截断输入、
+  热键会话与链路切换、配置采集、GUI 运行代次隔离及热键选项兼容性。
+- 无 GUI 特性包含其中 29 个核心单元测试。
 - 集成测试 2 个（`tests/golden.rs`）：
   - `decode_golden_vectors`：用 vendored sbc 解码 `tests/data/msbc_frames.bin`（240 帧，
     含静音/1kHz 正弦/白噪声/混合段），与 `pcm_ref.s16le`（由 `tests/data/gen_vectors.py`
@@ -116,7 +117,8 @@ src/
 ├── config.rs        JSON 配置 (mousemic_gui.json，向后兼容旧配置) + 注册表自启；
 │                    前进/后退独立 AI 开关 (ai_fwd/ai_bwd，仅语音模式)
 ├── devices.rs       AJ200 系列 PID 白名单设备注册表（21 个 PID / 22 条记录）
-├── gui.rs           native-windows-gui 面板 + 系统托盘（受 gui feature 控制）
+├── gui.rs           native-windows-gui 双栏面板 + 系统托盘（受 gui feature 控制）
+├── gui_theme.rs     GDI 原生控件主题、主次按钮与高对比度回退（受 gui feature 控制）
 ├── single_instance.rs  命名互斥量 (Global\mousemic_single) 防多开
 ├── dialog.rs        MessageBox 错误弹窗 + panic hook（发布版无控制台时兜底）
 └── error.rs         anyhow 错误别名
@@ -189,8 +191,10 @@ tests/data/          msbc_frames.bin / pcm_ref.s16le / gen_vectors.py / vectors.
   收日志/状态，Win32 计时器（~100ms）轮询刷新 UI；事件回调是 `&self`，
   运行态字段用 `RefCell<AppState>` 提供内部可变性（避免嵌套 `borrow_mut` 死锁，
   见 `gui.rs::start_bridge` 先取值释放借用再处理的写法）。
-- 全局默认字体用系统 UI 字体（`nwg::Font::set_global_family("Segoe UI")`），
-  GDI 原生控件直接渲染系统字体，**不把字体文件读进内存**，无 egui 的中文 tofu 问题。
+- 全局默认字体使用系统 `Microsoft YaHei UI`，通过 `size_absolute` 指定字高，
+  标题、分组与辅助文本分级；GDI 原生控件直接渲染系统字体，**不把字体文件读进内存**。
+- `gui_theme.rs` 仅处理绘制，保留原生键盘/焦点/点击行为；高对比度模式回退系统样式。
+  主题对象必须在 HWND 销毁前释放，以先解绑消息处理器。
 - 热键下拉框含特殊项 **“仅语音(无热键)”**（`gui.rs::VOICE_ONLY`）：选中后该键
   配置为 `hotkey=None + ai=true`，实现“长按触发麦克风但不注入按键”。
   下拉选中项 ↔ Config 的双向映射集中在 `gui.rs::split_hotkey_sel`（选中→配置）与
@@ -216,7 +220,7 @@ tests/data/          msbc_frames.bin / pcm_ref.s16le / gen_vectors.py / vectors.
 GUI 启动后按住鼠标语音键却无声，按优先级排查：
 1. **先看 GUI 日志面板**（每按一次键/每秒都会打）：
    - 出现 `音频输出设备: <名>` → 音频设备已成功打开；若显示 `音频设备错误: 找不到输出设备...`
-     说明设备名没匹配上（默认 cable 模式找 `CABLE Input`，用 `--list` 或 GUI“列出设备”核对真实名）。
+     说明设备名没匹配上（默认 cable 模式找 `CABLE Input`，用 `--list` 或 GUI“刷新音频设备”核对真实名）。
    - 按住语音键后出现 `语音包=... 解码OK=... 失败=... 队列≈...` 且 `语音包` 在涨 →
       **HID 数据在流、解码在工作**，问题在音频输出/监听；若 `语音包` 始终为 0 →
      鼠标没在发音频包（ARM 激活失败 / 链路不对 / 键位不对）。

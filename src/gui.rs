@@ -11,7 +11,7 @@
 //! 接收日志/状态, 用 Win32 计时器 (~100ms) 轮询通道刷新 UI。托盘菜单命令也经通道交给
 //! 主线程。事件回调是 `&self`, 运行态字段用 `RefCell<AppState>` 提供内部可变性。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -31,6 +31,7 @@ use cpal::traits::{DeviceTrait, HostTrait};
 
 /// 热键下拉框里的"仅语音"特殊项: 启用该键 AI(长按触发麦克风)但不注入任何按键。
 const VOICE_ONLY: &str = "仅语音(无热键)";
+const DISABLED_KEY: &str = "禁用语音";
 
 /// 把热键下拉选中项拆成 (联动热键名, 仅语音开关):
 /// - "无" → 不联动且禁用 AI;
@@ -38,7 +39,7 @@ const VOICE_ONLY: &str = "仅语音(无热键)";
 /// - 热键名 → 联动(绑定热键隐式启用 AI, ai 置 false 由 Config 判定兜底)。
 fn split_hotkey_sel(sel: &str) -> (Option<String>, bool) {
     match sel {
-        "无" => (None, false),
+        "无" | DISABLED_KEY => (None, false),
         VOICE_ONLY => (None, true),
         other => (Some(other.to_string()), false),
     }
@@ -182,12 +183,12 @@ impl AppState {
         self.hotkey_fwd = match (&cfg.hotkey_forward, cfg.ai_fwd) {
             (Some(h), _) => h.clone(),
             (None, true) => VOICE_ONLY.to_string(),
-            (None, false) => "无".to_string(),
+            (None, false) => DISABLED_KEY.to_string(),
         };
         self.hotkey_bwd = match (&cfg.hotkey_backward, cfg.ai_bwd) {
             (Some(h), _) => h.clone(),
             (None, true) => VOICE_ONLY.to_string(),
-            (None, false) => "无".to_string(),
+            (None, false) => DISABLED_KEY.to_string(),
         };
         self.driver = cfg.driver.clone();
         self.autostart_on = cfg.autostart;
@@ -284,125 +285,160 @@ impl AppState {
 pub struct GuiApp {
     // 运行态 (无 nwg 属性; 由 RefCell 包裹, 在 &self 回调里 borrow_mut)
     state: RefCell<AppState>,
+    ready: Cell<bool>,
+    log_dirty: Cell<bool>,
+
+    // 主题先于 HWND 释放, 以便在窗口销毁前解绑原生消息处理器。
+    theme: RefCell<Option<crate::gui_theme::GuiTheme>>,
+
+    #[nwg_resource(family: "Microsoft YaHei UI", size_absolute: 24, weight: 700)]
+    title_font: nwg::Font,
+    #[nwg_resource(family: "Microsoft YaHei UI", size_absolute: 16, weight: 600)]
+    section_font: nwg::Font,
+    #[nwg_resource(family: "Microsoft YaHei UI", size_absolute: 13)]
+    hint_font: nwg::Font,
 
     // ---- 顶层窗口 ----
-    #[nwg_control(size: (580, 826), position: (300, 120), title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
+    #[nwg_control(size: (920, 680), center: true, title: "AJAZZ 语音鼠标桥接器", flags: "WINDOW|VISIBLE|MINIMIZE_BOX")]
     #[nwg_events( OnWindowClose: [GuiApp::on_close] )]
     window: nwg::Window,
 
-    // ---- 标题 ----
-    #[nwg_control(parent: window, text: "AJAZZ 语音鼠标桥接器", position: (20, 12), size: (540, 28))]
+    #[nwg_control(parent: window, text: "MouseMic", position: (20, 14), size: (620, 34), font: Some(&data.title_font))]
     heading: nwg::Label,
-
-    // ---- 状态 ----
-    #[nwg_control(parent: window, text: "● 已停止", position: (20, 46), size: (200, 20))]
-    lbl_status: nwg::Label,
-    #[nwg_control(parent: window, text: "电量: --", position: (240, 46), size: (320, 20))]
+    #[nwg_control(parent: window, text: "AJAZZ 语音鼠标桥接器  /  让鼠标成为你的麦克风", position: (20, 52), size: (630, 22), font: Some(&data.hint_font))]
+    lbl_subtitle: nwg::Label,
+    #[nwg_control(parent: window, text: "鼠标电量  --", position: (712, 30), size: (188, 24))]
     lbl_battery: nwg::Label,
 
-    // ---- 依赖检查 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 214), position: (20, 76), flags: "VISIBLE|BORDER")]
-    deps_frame: nwg::Frame,
-    #[nwg_control(parent: deps_frame, position: (10, 24), size: (420, 178), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
-    deps_list: nwg::TextBox,
-    #[nwg_control(parent: deps_frame, text: "检查依赖", position: (440, 24), size: (90, 30))]
-    #[nwg_events( OnButtonClick: [GuiApp::refresh_deps] )]
-    btn_check_deps: nwg::Button,
-    #[nwg_control(parent: deps_frame, text: "诊断 HID", position: (440, 60), size: (90, 30))]
-    #[nwg_events( OnButtonClick: [GuiApp::diag_hid] )]
-    btn_diag_hid: nwg::Button,
-    #[nwg_control(parent: deps_frame, text: "列出设备", position: (440, 96), size: (90, 30))]
-    #[nwg_events( OnButtonClick: [GuiApp::list_devices_btn] )]
-    btn_list_dev: nwg::Button,
-    #[nwg_control(parent: deps_frame, text: "安装依赖", position: (440, 132), size: (90, 30))]
-    #[nwg_events( OnButtonClick: [GuiApp::install_deps] )]
-    btn_install_deps: nwg::Button,
-
-    // ---- 设置 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 260), position: (20, 298), flags: "VISIBLE|BORDER")]
-    settings_frame: nwg::Frame,
-
-    #[nwg_control(parent: settings_frame, text: "输出模式", position: (10, 24), size: (75, 22))]
-    lbl_mode: nwg::Label,
-    #[nwg_control(parent: settings_frame, text: "扬声器试听", position: (100, 24), size: (120, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_mode_play] )]
-    rb_play: nwg::RadioButton,
-    #[nwg_control(parent: settings_frame, text: "虚拟麦克风", position: (225, 24), size: (120, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_mode_cable] )]
-    rb_cable: nwg::RadioButton,
-    #[nwg_control(parent: settings_frame, text: "", position: (10, 50), size: (520, 40))]
-    lbl_mode_hint: nwg::Label,
-
-    #[nwg_control(parent: settings_frame, text: "设备名", position: (10, 97), size: (55, 22))]
-    lbl_dev: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (300, 28), position: (70, 94))]
-    cb_cable: nwg::ComboBox<String>,
-
-    #[nwg_control(parent: settings_frame, text: "前进键", position: (10, 131), size: (55, 22))]
-    lbl_hotkey_fwd: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (110, 28), position: (70, 128))]
-    cb_hotkey_fwd: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "后退键", position: (200, 131), size: (55, 22))]
-    lbl_hotkey_bwd: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (110, 28), position: (260, 128))]
-    cb_hotkey_bwd: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "注入", position: (380, 131), size: (35, 22))]
-    lbl_driver: nwg::Label,
-    #[nwg_control(parent: settings_frame, size: (120, 28), position: (415, 128))]
-    cb_driver: nwg::ComboBox<String>,
-
-    // ---- Typeless 模式 ----
-    #[nwg_control(parent: settings_frame, text: "Typeless模式", position: (10, 164), size: (95, 22))]
-    lbl_typeless: nwg::Label,
-    #[nwg_control(parent: settings_frame, text: "前进", position: (110, 164), size: (55, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
-    chk_typeless_fwd: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "后退", position: (170, 164), size: (55, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
-    chk_typeless_bwd: nwg::CheckBox,
-
-    // ---- 自动回车 ----
-    #[nwg_control(parent: settings_frame, text: "自动发送", position: (10, 197), size: (85, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
-    chk_auto_enter: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, size: (110, 28), position: (100, 194))]
-    #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
-    cb_auto_enter_mode: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "延迟", position: (220, 197), size: (38, 22))]
-    lbl_auto_delay: nwg::Label,
-    #[nwg_control(parent: settings_frame, text: "0.5", position: (260, 196), size: (38, 24))]
-    txt_auto_delay: nwg::TextInput,
-    #[nwg_control(parent: settings_frame, text: "秒", position: (302, 197), size: (25, 22))]
-    lbl_auto_unit: nwg::Label,
-
-    #[nwg_control(parent: settings_frame, text: "开机自启", position: (10, 228), size: (85, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_autostart_change] )]
-    chk_autostart: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "启动最小化到托盘", position: (100, 228), size: (155, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
-    chk_minimize: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "自动起桥接", position: (260, 228), size: (105, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
-    chk_autostart_svc: nwg::CheckBox,
-    #[nwg_control(parent: settings_frame, text: "调试日志", position: (370, 228), size: (90, 22))]
-    #[nwg_events( OnButtonClick: [GuiApp::on_debug_change] )]
-    chk_debug: nwg::CheckBox,
-
-    // ---- 启停按钮 (直接在 window 上) ----
-    #[nwg_control(parent: window, text: "▶ 启动", position: (20, 568), size: (130, 36))]
+    // ---- 状态与主操作 ----
+    #[nwg_control(parent: window, size: (880, 68), position: (20, 88), flags: "VISIBLE")]
+    action_frame: nwg::Frame,
+    #[nwg_control(parent: action_frame, text: "已停止", position: (16, 10), size: (480, 24), font: Some(&data.section_font))]
+    lbl_status: nwg::Label,
+    #[nwg_control(parent: action_frame, text: "选择输出模式，然后启动桥接。", position: (16, 38), size: (500, 20), font: Some(&data.hint_font))]
+    lbl_run_hint: nwg::Label,
+    #[nwg_control(parent: action_frame, text: "启动桥接", position: (530, 16), size: (120, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::start_bridge] )]
     btn_start: nwg::Button,
-    #[nwg_control(parent: window, text: "■ 停止", position: (160, 568), size: (130, 36))]
+    #[nwg_control(parent: action_frame, text: "停止", position: (662, 16), size: (82, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::stop_bridge] )]
     btn_stop: nwg::Button,
-    #[nwg_control(parent: window, text: "最小化到托盘", position: (300, 568), size: (140, 36))]
+    #[nwg_control(parent: action_frame, text: "收起到托盘", position: (756, 16), size: (108, 36))]
     #[nwg_events( OnButtonClick: [GuiApp::hide_to_tray] )]
     btn_hide: nwg::Button,
 
-    // ---- 日志 (Frame 容器 + 子控件) ----
-    #[nwg_control(parent: window, size: (540, 190), position: (20, 618), flags: "VISIBLE|BORDER")]
+    // ---- 音频与按键设置 ----
+    #[nwg_control(parent: window, size: (550, 332), position: (20, 172), flags: "VISIBLE")]
+    settings_frame: nwg::Frame,
+    #[nwg_control(parent: settings_frame, text: "音频输出", position: (16, 12), size: (240, 24), font: Some(&data.section_font))]
+    lbl_audio_heading: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "输出模式", position: (16, 46), size: (72, 22))]
+    lbl_mode: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "扬声器试听", position: (94, 44), size: (144, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_mode_play] )]
+    rb_play: nwg::RadioButton,
+    #[nwg_control(parent: settings_frame, text: "虚拟麦克风", position: (264, 44), size: (144, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_mode_cable] )]
+    rb_cable: nwg::RadioButton,
+    #[nwg_control(parent: settings_frame, text: "", position: (16, 76), size: (518, 36), font: Some(&data.hint_font))]
+    lbl_mode_hint: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "输出设备", position: (16, 118), size: (72, 22))]
+    lbl_dev: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (440, 28), position: (94, 114))]
+    #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
+    cb_cable: nwg::ComboBox<String>,
+
+    #[nwg_control(parent: settings_frame, text: "语音与按键", position: (16, 156), size: (240, 24), font: Some(&data.section_font))]
+    lbl_keys_heading: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "前进键", position: (16, 192), size: (60, 22))]
+    lbl_hotkey_fwd: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (164, 28), position: (78, 188))]
+    #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
+    cb_hotkey_fwd: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "后退键", position: (280, 192), size: (60, 22))]
+    lbl_hotkey_bwd: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (194, 28), position: (340, 188))]
+    #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
+    cb_hotkey_bwd: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "注入方式", position: (16, 230), size: (62, 22))]
+    lbl_driver: nwg::Label,
+    #[nwg_control(parent: settings_frame, size: (164, 28), position: (78, 226))]
+    #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
+    cb_driver: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "Typeless", position: (280, 230), size: (78, 22))]
+    lbl_typeless: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "前进", position: (364, 228), size: (78, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
+    chk_typeless_fwd: nwg::CheckBox,
+    #[nwg_control(parent: settings_frame, text: "后退", position: (450, 228), size: (78, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
+    chk_typeless_bwd: nwg::CheckBox,
+
+    #[nwg_control(parent: settings_frame, text: "自动发送", position: (16, 266), size: (96, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_auto_enter_toggle] )]
+    chk_auto_enter: nwg::CheckBox,
+    #[nwg_control(parent: settings_frame, size: (126, 28), position: (118, 264))]
+    #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
+    cb_auto_enter_mode: nwg::ComboBox<String>,
+    #[nwg_control(parent: settings_frame, text: "延迟", position: (280, 268), size: (40, 22))]
+    lbl_auto_delay: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "0.5", position: (324, 264), size: (64, 26))]
+    #[nwg_events( OnTextInput: [GuiApp::on_delay_change] )]
+    txt_auto_delay: nwg::TextInput,
+    #[nwg_control(parent: settings_frame, text: "秒（0–10）", position: (398, 268), size: (130, 22), font: Some(&data.hint_font))]
+    lbl_auto_unit: nwg::Label,
+    #[nwg_control(parent: settings_frame, text: "仅语音：长按录音，不触发热键；禁用：关闭该键语音。", position: (16, 306), size: (518, 20), font: Some(&data.hint_font))]
+    lbl_hotkey_hint: nwg::Label,
+
+    // ---- 环境自检 ----
+    #[nwg_control(parent: window, size: (314, 220), position: (586, 172), flags: "VISIBLE")]
+    deps_frame: nwg::Frame,
+    #[nwg_control(parent: deps_frame, text: "环境自检", position: (16, 12), size: (282, 24), font: Some(&data.section_font))]
+    lbl_deps_heading: nwg::Label,
+    #[nwg_control(parent: deps_frame, position: (16, 46), size: (282, 80), flags: "VISIBLE|AUTOVSCROLL|VSCROLL|TAB_STOP", readonly: true)]
+    deps_list: nwg::TextBox,
+    #[nwg_control(parent: deps_frame, text: "重新检查", position: (16, 138), size: (134, 30))]
+    #[nwg_events( OnButtonClick: [GuiApp::refresh_deps] )]
+    btn_check_deps: nwg::Button,
+    #[nwg_control(parent: deps_frame, text: "刷新音频设备", position: (164, 138), size: (134, 30))]
+    #[nwg_events( OnButtonClick: [GuiApp::list_devices_btn] )]
+    btn_list_dev: nwg::Button,
+    #[nwg_control(parent: deps_frame, text: "诊断 HID", position: (16, 178), size: (134, 30))]
+    #[nwg_events( OnButtonClick: [GuiApp::diag_hid] )]
+    btn_diag_hid: nwg::Button,
+    #[nwg_control(parent: deps_frame, text: "依赖下载说明", position: (164, 178), size: (134, 30))]
+    #[nwg_events( OnButtonClick: [GuiApp::install_deps] )]
+    btn_install_deps: nwg::Button,
+
+    #[nwg_control(parent: window, size: (314, 96), position: (586, 408), flags: "VISIBLE")]
+    preferences_frame: nwg::Frame,
+    #[nwg_control(parent: preferences_frame, text: "启动与后台", position: (16, 8), size: (282, 24), font: Some(&data.section_font))]
+    lbl_preferences_heading: nwg::Label,
+    #[nwg_control(parent: preferences_frame, text: "开机自启", position: (16, 36), size: (134, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_autostart_change] )]
+    chk_autostart: nwg::CheckBox,
+    #[nwg_control(parent: preferences_frame, text: "启动收起到托盘", position: (164, 36), size: (134, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
+    chk_minimize: nwg::CheckBox,
+    #[nwg_control(parent: preferences_frame, text: "启动自动桥接", position: (16, 64), size: (134, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
+    chk_autostart_svc: nwg::CheckBox,
+    #[nwg_control(parent: preferences_frame, text: "调试日志", position: (164, 64), size: (134, 24))]
+    #[nwg_events( OnButtonClick: [GuiApp::on_debug_change] )]
+    chk_debug: nwg::CheckBox,
+
+    // ---- 日志 ----
+    #[nwg_control(parent: window, size: (880, 140), position: (20, 520), flags: "VISIBLE")]
     log_frame: nwg::Frame,
-    #[nwg_control(parent: log_frame, position: (10, 24), size: (520, 150), flags: "VISIBLE|AUTOVSCROLL|VSCROLL", readonly: true)]
+    #[nwg_control(parent: log_frame, text: "运行日志", position: (16, 10), size: (132, 24), font: Some(&data.section_font))]
+    lbl_log_heading: nwg::Label,
+    #[nwg_control(parent: log_frame, text: "自动滚动", position: (666, 8), size: (108, 24), check_state: nwg::CheckBoxState::Checked)]
+    #[nwg_events( OnButtonClick: [GuiApp::on_log_follow] )]
+    chk_log_follow: nwg::CheckBox,
+    #[nwg_control(parent: log_frame, text: "清空", position: (790, 6), size: (74, 28))]
+    #[nwg_events( OnButtonClick: [GuiApp::clear_log] )]
+    btn_clear_log: nwg::Button,
+    #[nwg_control(parent: log_frame, position: (16, 42), size: (848, 86), flags: "VISIBLE|AUTOVSCROLL|VSCROLL|TAB_STOP", readonly: true, limit: 262144)]
     log_box: nwg::TextBox,
 
     // ---- 系统托盘 ----
@@ -439,7 +475,7 @@ impl GuiApp {
         state.load_config(&cfg);
 
         // 热键下拉框数据 (无 + 仅语音 + HOTKEY_NAMES)
-        let mut hk = vec!["无".to_string(), VOICE_ONLY.to_string()];
+        let mut hk = vec![DISABLED_KEY.to_string(), VOICE_ONLY.to_string()];
         hk.extend(crate::hotkey::HOTKEY_NAMES.iter().map(|s| s.to_string()));
         state.hotkey_items = hk;
         state.driver_items = vec!["sendinput".to_string(), "interception".to_string()];
@@ -460,6 +496,53 @@ impl GuiApp {
         // 标题栏带上版本号 (nwg_control 属性是静态字面量, 这里运行时设置,
         // 与 single_instance 查找用的 WINDOW_TITLE 同一来源, 不会失配)。
         self.window.set_text(crate::WINDOW_TITLE);
+        match crate::gui_theme::GuiTheme::install(
+            &self.window.handle,
+            &[
+                &self.action_frame.handle,
+                &self.settings_frame.handle,
+                &self.deps_frame.handle,
+                &self.preferences_frame.handle,
+                &self.log_frame.handle,
+            ],
+            &self.btn_start.handle,
+            &[
+                &self.btn_stop.handle,
+                &self.btn_hide.handle,
+                &self.btn_check_deps.handle,
+                &self.btn_list_dev.handle,
+                &self.btn_diag_hid.handle,
+                &self.btn_install_deps.handle,
+                &self.btn_clear_log.handle,
+            ],
+            &[
+                &self.lbl_subtitle.handle,
+                &self.lbl_battery.handle,
+                &self.lbl_run_hint.handle,
+                &self.lbl_mode_hint.handle,
+                &self.lbl_hotkey_hint.handle,
+                &self.lbl_auto_unit.handle,
+            ],
+            &[
+                &self.heading.handle,
+                &self.lbl_status.handle,
+                &self.lbl_audio_heading.handle,
+                &self.lbl_keys_heading.handle,
+                &self.lbl_deps_heading.handle,
+                &self.lbl_preferences_heading.handle,
+                &self.lbl_log_heading.handle,
+                &self.lbl_mode.handle,
+                &self.lbl_dev.handle,
+                &self.lbl_hotkey_fwd.handle,
+                &self.lbl_hotkey_bwd.handle,
+                &self.lbl_driver.handle,
+                &self.lbl_typeless.handle,
+                &self.lbl_auto_delay.handle,
+            ],
+        ) {
+            Ok(theme) => *self.theme.borrow_mut() = Some(theme),
+            Err(e) => self.append_log(&format!("主题加载失败，使用系统样式: {}", e)),
+        }
 
         let st = self.state.borrow();
 
@@ -576,6 +659,10 @@ impl GuiApp {
         self.update_mode_hint(&st);
 
         drop(st);
+        self.update_auto_enter_controls();
+        self.update_run_state_ui(false);
+        self.ready.set(true);
+        self.btn_start.set_focus();
 
         self.append_log("AJAZZ 语音鼠标桥接器已启动。");
         self.refresh_deps();
@@ -668,14 +755,14 @@ impl GuiApp {
         }
         self.cb_cable.set_enabled(!play);
         self.update_mode_hint(&self.state.borrow());
-        self.persist_config();
+        self.save_settings();
     }
 
     fn update_mode_hint(&self, st: &AppState) {
         let hint = if st.mode_play {
-            "提示: 扬声器试听直接经扬声器/耳机播放, 用于确认鼠标确实在出声。"
+            "通过系统默认扬声器 / 耳机试听，无需虚拟声卡。\r\n下方的输出设备仅用于虚拟麦克风模式。"
         } else {
-            "提示: 虚拟麦克风把声音送入 VB-CABLE 输入;\r\n在其他软件把 'CABLE Output' 选为麦克风, 或开启该设备监听才能听到。"
+            "将声音送入 VB-CABLE；在会议或输入法软件中，\r\n把 CABLE Output 选为麦克风即可使用。"
         };
         self.lbl_mode_hint.set_text(hint);
     }
@@ -701,6 +788,9 @@ impl GuiApp {
     }
 
     fn on_persist_setting(&self) {
+        if !self.ready.get() {
+            return;
+        }
         let mut st = self.state.borrow_mut();
         st.minimize_to_tray = self.chk_minimize.check_state() == nwg::CheckBoxState::Checked;
         st.auto_start_service = self.chk_autostart_svc.check_state() == nwg::CheckBoxState::Checked;
@@ -708,20 +798,40 @@ impl GuiApp {
         st.typeless_fwd = self.chk_typeless_fwd.check_state() == nwg::CheckBoxState::Checked;
         st.typeless_bwd = self.chk_typeless_bwd.check_state() == nwg::CheckBoxState::Checked;
         drop(st);
-        self.persist_config();
+        self.save_settings();
+    }
+
+    fn save_settings(&self) {
+        let saved = self.persist_config();
+        self.state.borrow_mut().cable_device = saved.cable_device;
+    }
+
+    fn update_auto_enter_controls(&self) {
+        let enabled = self.chk_auto_enter.check_state() == nwg::CheckBoxState::Checked;
+        self.cb_auto_enter_mode.set_enabled(enabled);
+        self.txt_auto_delay.set_enabled(enabled);
+        self.lbl_auto_delay.set_enabled(enabled);
+        self.lbl_auto_unit.set_enabled(enabled);
     }
 
     fn on_auto_enter_toggle(&self) {
+        self.update_auto_enter_controls();
         self.on_persist_setting();
+    }
+
+    fn on_delay_change(&self) {
+        if self.ready.get() {
+            self.save_settings();
+        }
     }
 
     fn on_debug_change(&self) {
         let on = self.chk_debug.check_state() == nwg::CheckBoxState::Checked;
         self.state.borrow_mut().debug_log = on;
         self.append_log(if on {
-            "调试日志已开启 (每秒输出语音包/解码/队列/回调统计数据)"
+            "已选择调试日志：下次启动桥接时输出语音包/解码/队列统计。"
         } else {
-            "调试日志已关闭"
+            "已取消调试日志：下次启动桥接时生效。"
         });
     }
 
@@ -786,9 +896,9 @@ impl GuiApp {
                             continue;
                         }
                         let txt = if charging {
-                            format!("电量: {}% 充电中", pct)
+                            format!("鼠标电量  {}% · 充电中", pct)
                         } else {
-                            format!("电量: {}%", pct)
+                            format!("鼠标电量  {}%", pct)
                         };
                         self.lbl_battery.set_text(&txt);
                         self.on_battery_update(pct, charging);
@@ -796,16 +906,30 @@ impl GuiApp {
                 }
             }
         }
+        if self.log_dirty.get() && self.chk_log_follow.check_state() == nwg::CheckBoxState::Checked
+        {
+            self.render_log();
+        }
     }
 
     fn update_run_state_ui(&self, running: bool) {
         self.lbl_status.set_text(if running {
-            "● 运行中"
+            "桥接服务运行中"
         } else {
-            "● 已停止"
+            "桥接已停止"
+        });
+        self.lbl_run_hint.set_text(if running {
+            "设备连接详情见日志；修改设置后需重新启动桥接。"
+        } else {
+            "选择输出模式，然后启动桥接。"
         });
         self.btn_start.set_enabled(!running);
         self.btn_stop.set_enabled(running);
+        self.m_start.set_enabled(!running);
+        self.m_stop.set_enabled(running);
+        if !running {
+            self.lbl_battery.set_text("鼠标电量  --");
+        }
     }
 
     /// 电池状态更新: 低电量(<10%)与充满(100%充电中)时弹托盘气泡提醒,
@@ -851,18 +975,38 @@ impl GuiApp {
     // ---------- 日志 ----------
 
     fn append_log(&self, msg: &str) {
-        self.state.borrow_mut().log_lines.push(msg.to_string());
-        // 限长
-        let text = {
-            let mut st = self.state.borrow_mut();
-            if st.log_lines.len() > 1000 {
-                let drop_n = st.log_lines.len() - 800;
-                st.log_lines.drain(..drop_n);
-            }
-            st.log_lines.join("\r\n")
-        };
-        self.log_box.set_text(&text);
+        let mut st = self.state.borrow_mut();
+        st.log_lines.push(msg.to_string());
+        if st.log_lines.len() > 1000 {
+            let drop_n = st.log_lines.len() - 800;
+            st.log_lines.drain(..drop_n);
+        }
+        self.log_dirty.set(true);
+    }
+
+    fn render_log(&self) {
+        self.log_box
+            .set_text(&self.state.borrow().log_lines.join("\r\n"));
         self.scroll_log_to_bottom();
+        self.log_dirty.set(false);
+    }
+
+    fn on_log_follow(&self) {
+        let follow = self.chk_log_follow.check_state() == nwg::CheckBoxState::Checked;
+        self.lbl_log_heading.set_text(if follow {
+            "运行日志"
+        } else {
+            "日志 · 暂停刷新"
+        });
+        if follow {
+            self.render_log();
+        }
+    }
+
+    fn clear_log(&self) {
+        self.state.borrow_mut().log_lines.clear();
+        self.log_box.set_text("");
+        self.log_dirty.set(false);
     }
 
     /// 把日志框滚动到最后一行 (EM_LINESCROLL, 保证新日志可见)。
@@ -941,7 +1085,7 @@ impl GuiApp {
             if found_cable {
                 "已安装".into()
             } else {
-                "未检测到".into()
+                "未安装（虚拟麦克风需安装）".into()
             },
         ));
 
@@ -985,11 +1129,11 @@ impl GuiApp {
         let status = if driver && dll {
             "已安装".into()
         } else if driver {
-            "缺 DLL".into()
+            "缺 DLL（可选）".into()
         } else if dll {
-            "缺驱动".into()
+            "缺驱动（可选）".into()
         } else {
-            "未安装".into()
+            "未安装（可选）".into()
         };
         items.push(("Interception".to_string(), status));
 
@@ -1018,14 +1162,28 @@ impl GuiApp {
     }
 
     fn list_devices_btn(&self) {
-        let tx = self.state.borrow().msg_tx.clone().unwrap();
-        let _ = tx.send(Msg::Log("可用输出设备:".into()));
-        if let Ok(devs) = cpal::default_host().output_devices() {
-            for (i, d) in devs.enumerate() {
-                if let Ok(name) = d.name() {
-                    let _ = tx.send(Msg::Log(format!("  [{}] {}", i, name)));
+        let selected = self
+            .cb_cable
+            .selection_string()
+            .unwrap_or_else(|| self.state.borrow().cable_device.clone());
+        match cpal::default_host().output_devices() {
+            Ok(devs) => {
+                let mut names: Vec<String> = devs.filter_map(|d| d.name().ok()).collect();
+                self.append_log("已刷新音频设备:");
+                if names.is_empty() {
+                    self.append_log("  未检测到输出设备；保留当前设置。");
                 }
+                for (i, name) in names.iter().enumerate() {
+                    self.append_log(&format!("  [{}] {}", i, name));
+                }
+                if !names.contains(&selected) {
+                    names.push(selected.clone());
+                }
+                let index = names.iter().position(|name| name == &selected);
+                self.cb_cable.set_collection(names);
+                self.cb_cable.set_selection(index);
             }
+            Err(e) => self.append_log(&format!("刷新音频设备失败: {}", e)),
         }
     }
 
@@ -1061,7 +1219,7 @@ impl GuiApp {
 
         // 说明
         let _ = msg("安装依赖",
-            "VB-CABLE (虚拟音频设备, 必须)\nhttps://vb-audio.com/Cable/index.htm\n\nInterception (键盘驱动, 非必须)\nhttps://github.com/oblitum/Interception\n\n提示: Interception 仅当某些程序模拟按键无法正常使用时才需要安装, 如豆包输入法。",
+            "VB-CABLE (仅虚拟麦克风模式需要, 扬声器试听无需安装)\nhttps://vb-audio.com/Cable/index.htm\n\nInterception (键盘驱动, 非必须)\nhttps://github.com/oblitum/Interception\n\n提示: Interception 仅当某些程序模拟按键无法正常使用时才需要安装, 如豆包输入法。",
             MB_OK | MB_ICONINFORMATION);
 
         // 逐项询问是否打开链接
@@ -1117,8 +1275,17 @@ impl GuiApp {
     fn persist_config(&self) -> Config {
         let cfg = self.current_config();
         self.state.borrow_mut().auto_enter_delay = cfg.auto_enter_delay;
-        if let Err(e) = cfg.save() {
-            self.append_log(&format!("配置保存失败 (本次设置仍可用于桥接): {}", e));
+        match cfg.save() {
+            Ok(()) => self.lbl_run_hint.set_text(if self.state.borrow().running {
+                "设置已保存；音频、热键和发送选项在下次启动桥接时生效。"
+            } else {
+                "设置已保存，启动桥接即可使用。"
+            }),
+            Err(e) => {
+                self.lbl_run_hint
+                    .set_text("设置保存失败，详情见日志；本次启动仍可使用当前设置。");
+                self.append_log(&format!("配置保存失败 (本次设置仍可用于桥接): {}", e));
+            }
         }
         cfg
     }
@@ -1164,10 +1331,11 @@ impl GuiApp {
             ));
         }
 
-        // 刷新 UI (借用仅限此次表达式)
-        self.log_box
-            .set_text(&self.state.borrow().log_lines.join("\r\n"));
+        self.log_dirty.set(true);
         self.update_run_state_ui(true);
+        self.lbl_status.set_text("正在启动桥接…");
+        self.lbl_run_hint
+            .set_text("正在初始化音频输出与桥接服务，请稍候。");
 
         let handle = std::thread::spawn(move || {
             let log_tx2 = msg_tx.clone();
@@ -1182,11 +1350,6 @@ impl GuiApp {
                     charging,
                 });
             };
-            let _ = msg_tx.send(Msg::Running {
-                generation,
-                running: true,
-            });
-
             let device_name = if cfg.mode == "play" {
                 None
             } else {
@@ -1198,6 +1361,10 @@ impl GuiApp {
                     let mut sink = |s: &[i16]| audio.push_pcm(s);
                     match Bridge::new(&cfg, &log) {
                         Ok(mut bridge) => {
+                            let _ = msg_tx.send(Msg::Running {
+                                generation,
+                                running: true,
+                            });
                             if let Err(e) = bridge.run(
                                 &mut sink,
                                 &|| audio.diagnostics(),
@@ -1230,7 +1397,7 @@ impl GuiApp {
             let _ = h.join();
         }
         self.update_run_state_ui(false);
-        self.lbl_battery.set_text("电量: --");
+        self.lbl_battery.set_text("鼠标电量  --");
         {
             let mut st = self.state.borrow_mut();
             st.battery_low_notified = false;
@@ -1250,9 +1417,15 @@ pub fn run(autostart: bool) {
         show_error_box(&format!("GUI 初始化失败:\n{}", e));
         return;
     }
-    // 全局默认字体: 系统 UI 字体 (默认大小)。控件宽度已针对中文加宽,
-    // 字体不改小也能正常显示。
-    let _ = nwg::Font::set_global_family("Segoe UI");
+    let mut font = nwg::Font::default();
+    if nwg::Font::builder()
+        .family("Microsoft YaHei UI")
+        .size_absolute(14)
+        .build(&mut font)
+        .is_ok()
+    {
+        nwg::Font::set_global_default(Some(font));
+    }
 
     // pre_build: 读配置 + 建通道 + 准备下拉框数据 (控件尚未创建)
     let mut default_state = AppState::default();
@@ -1271,11 +1444,7 @@ pub fn run(autostart: bool) {
             return;
         }
     };
-    // 不在这里调用 set_size — MAIN_WINDOW 标志会让系统使用标准重叠窗口,
-    // 不再出现 130x44 异常尺寸。尺寸由 on_min_max 锁死。
-    // post_build 立即触发 (填充下拉框/复选框/启动计时器)。
-    // post_build 立即触发 (填充下拉框/复选框/启动计时器), 不要等计时器首 tick
-    // (计时器同样需要 post_build 启动, 会引发鸡生蛋问题)
+    // 计时器由 post_build 启动, 初始化不能依赖首次 tick。
     _ui.post_build();
     // _ui 必须保留到 dispatch 结束 (持有 GuiApp 的所有权)。
     nwg::dispatch_thread_events();
@@ -1355,6 +1524,25 @@ mod tests {
         assert_eq!(parse_auto_enter_delay("abc", 0.5), 0.5);
         assert_eq!(parse_auto_enter_delay("NaN", 3.0), 3.0);
         assert_eq!(parse_auto_enter_delay("inf", 0.5), 0.5);
+    }
+
+    #[test]
+    fn hotkey_labels_preserve_voice_only_and_legacy_disabled_semantics() {
+        assert_eq!(split_hotkey_sel(DISABLED_KEY), (None, false));
+        assert_eq!(split_hotkey_sel("无"), (None, false));
+        assert_eq!(split_hotkey_sel(VOICE_ONLY), (None, true));
+        assert_eq!(split_hotkey_sel("R_alt"), (Some("R_alt".into()), false));
+
+        let mut st = AppState::default();
+        st.load_config(&Config {
+            hotkey_forward: None,
+            hotkey_backward: None,
+            ai_fwd: false,
+            ai_bwd: true,
+            ..Config::default()
+        });
+        assert_eq!(st.hotkey_fwd, DISABLED_KEY);
+        assert_eq!(st.hotkey_bwd, VOICE_ONLY);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "mousemic-rs"
-version = "1.4.7"
+version = "1.4.8"
 edition = "2021"
 description = "AJAZZ 语音鼠标 (VID=363C) 桥接为普通麦克风 — Rust 重写版"
 license = "MIT"
@@ -45,6 +45,9 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
     "Win32_System_Threading",
     "Win32_System_Console",
     "Win32_Storage_FileSystem",

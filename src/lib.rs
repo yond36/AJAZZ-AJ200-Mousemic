@@ -29,6 +29,8 @@ pub mod single_instance;
 
 #[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "gui")]
+pub mod gui_theme;
 
 /// 鼠标厂商/音频常量 (与 Python 版保持一致)。
 pub const VID: u16 = 0x363C;
