@@ -442,9 +442,13 @@ pub struct GuiApp {
     log_box: nwg::TextBox,
 
     // ---- 系统托盘 ----
-    #[nwg_resource(source_system: Some(nwg::OemIcon::Information))]
+    #[nwg_resource]
+    resources: nwg::EmbedResource,
+    #[nwg_resource(source_embed: Some(&data.resources), source_embed_id: 1, size: Some((32, 32)))]
     icon: nwg::Icon,
-    #[nwg_control(parent: window, icon: Some(&data.icon), tip: Some("AJAZZ 语音鼠标"))]
+    #[nwg_resource(source_embed: Some(&data.resources), source_embed_id: 1, size: Some((16, 16)))]
+    small_icon: nwg::Icon,
+    #[nwg_control(parent: window, icon: Some(&data.small_icon), tip: Some("MouseMic · AJAZZ 语音鼠标"))]
     #[nwg_events( MousePressLeftUp: [GuiApp::tray_show_win], OnContextMenu: [GuiApp::tray_show_menu] )]
     tray: nwg::TrayNotification,
     #[nwg_control(parent: window, popup: true)]
@@ -496,6 +500,19 @@ impl GuiApp {
         // 标题栏带上版本号 (nwg_control 属性是静态字面量, 这里运行时设置,
         // 与 single_instance 查找用的 WINDOW_TITLE 同一来源, 不会失配)。
         self.window.set_text(crate::WINDOW_TITLE);
+        self.window.set_icon(Some(&self.small_icon));
+        if let Some(raw) = self.window.handle.hwnd() {
+            use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, ICON_BIG, WM_SETICON};
+            unsafe {
+                SendMessageW(
+                    HWND(raw as _),
+                    WM_SETICON,
+                    WPARAM(ICON_BIG as usize),
+                    LPARAM(self.icon.handle as isize),
+                );
+            }
+        }
         match crate::gui_theme::GuiTheme::install(
             &self.window.handle,
             &[

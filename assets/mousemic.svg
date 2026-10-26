@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">MouseMic</title>
+  <desc id="desc">A white computer mouse framed by a microphone cradle on a blue rounded square.</desc>
+  <defs>
+    <linearGradient id="blue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3268F5"/>
+      <stop offset="1" stop-color="#1D43CB"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#blue)"/>
+  <rect x="174" y="88" width="164" height="260" rx="82" fill="#FFFFFF"/>
+  <rect x="245" y="120" width="22" height="62" rx="11" fill="#2452DD"/>
+  <path d="M130 258 V306 C130 376 186 412 256 412 C326 412 382 376 382 306 V258 M256 412 V452 M206 452 H306" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

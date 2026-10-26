@@ -35,6 +35,17 @@ fn main() {
 
     b.compile("sbc");
 
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_FEATURE_GUI").is_ok()
+    {
+        let mut resource = winresource::WindowsResource::new();
+        resource.set_icon("assets/mousemic.ico");
+        resource
+            .compile_for("MouseMic")
+            .expect("编译 MouseMic 图标资源失败");
+    }
+    println!("cargo:rerun-if-changed=assets/mousemic.ico");
+
     // 源码变更时重新编译。
     for f in std::fs::read_dir("vendor/sbc").unwrap().flatten() {
         println!("cargo:rerun-if-changed={}", f.path().display());

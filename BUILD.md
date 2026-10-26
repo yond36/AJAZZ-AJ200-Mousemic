@@ -3,7 +3,7 @@
 本目录是用 Rust 对原 Python 版 MouseMic（AJAZZ 语音鼠标的 mSBC→PCM 桥接）的完整重写。
 本文记录**已验证可编译/测试/构建**的环境与步骤，并收录编译期踩过的 API 坑，避免重建时重蹈覆辙。
 
-当前版本：**v1.4.8**（与 `Cargo.toml` / `Cargo.lock` 一致）。
+当前版本：**v1.4.9**（与 `Cargo.toml` / `Cargo.lock` 一致）。
 
 ## 1. 先决条件（本机 Windows）
 
@@ -12,7 +12,8 @@
     （Windows Git Bash 下；PowerShell 用 `$env:PATH = "$HOME\.cargo\bin;$env:PATH"`）。
 - **MSVC 构建工具 + Windows SDK**：安装 Visual Studio Build Tools 勾选
   “使用 C++ 的桌面开发”，以及 Windows SDK（实测 10.0.26100.0）。
-  `cpal`(WASAPI) / `windows` crate / `cc`(编译 vendored sbc) 都需要它。
+  `cpal`(WASAPI) / `windows` crate / `cc`(编译 vendored sbc) 都需要它；
+  GUI 构建还会用 `winresource` 从 SDK 编译 `assets/mousemic.ico` 并嵌入 EXE。
 - **真机硬件**（仅运行/测试需要，非编译需要）：
   - AJAZZ 语音鼠标（VID `0x363C`，音频 HID usage_page `0xFFAA`）。
   - 虚拟声卡（如 VB-CABLE），用于接收桥接出的 PCM。
@@ -247,7 +248,7 @@ GUI 启动后按住鼠标语音键却无声，按优先级排查：
 
 ## 9. 发布
 
-- `cargo build --release` 产物 `target/release/MouseMic.exe`（约 1.4MB，静态链接 sbc，无 DLL 依赖）。
+- `cargo build --release` 产物 `target/release/MouseMic.exe`（静态链接 sbc，内嵌多尺寸应用图标，无图标 DLL 依赖）。
 - 发布包 = exe + 可选 `interception.dll`（仅用 Interception 驱动时）+
   `RELEASE_NOTES_v*.md`（版本说明，`release/` 目录有历史归档）。
 - 配置在 exe 同目录的 `mousemic_gui.json`（自动生成，与 Python 版 schema 兼容）。

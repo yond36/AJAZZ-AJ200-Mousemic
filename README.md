@@ -55,7 +55,8 @@ cd AJAZZ-AJ200-Mousemic
 cargo build --release
 ```
 
-产物：`target/release/MouseMic.exe`（约 1.3MB）
+产物：`target/release/MouseMic.exe`。图标已嵌入程序，无需额外携带图片文件。
+图标源文件为 [`assets/mousemic.svg`](assets/mousemic.svg)，Windows 多尺寸图标为 [`assets/mousemic.ico`](assets/mousemic.ico)；如需调整图形，可同步编辑 SVG 和 `assets/generate_icon.py`，使用 Pillow 运行 `python assets/generate_icon.py` 重新生成 PNG 与 ICO。
 
 ## 技术细节
 

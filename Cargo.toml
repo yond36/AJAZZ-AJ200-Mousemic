@@ -1,6 +1,6 @@
 [package]
 name = "mousemic-rs"
-version = "1.4.8"
+version = "1.4.9"
 edition = "2021"
 description = "AJAZZ 语音鼠标 (VID=363C) 桥接为普通麦克风 — Rust 重写版"
 license = "MIT"
@@ -66,6 +66,7 @@ native-windows-derive = { version = "1.0", optional = true }
 [build-dependencies]
 # 静态编译 vendored sbc (BlueZ SBC/mSBC codec, nefarius/libsbc fork) 供 msbc 模块 FFI
 cc = "1"
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3
