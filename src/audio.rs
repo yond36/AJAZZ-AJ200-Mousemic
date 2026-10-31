@@ -101,7 +101,7 @@ impl AudioOutput {
                 Some(d) => d,
                 None => {
                     return Err(anyhow!(
-                        "找不到输出设备 '{}' (用 --list 查看可用设备)",
+                        "找不到输出设备 '{}' (请在界面中刷新音频设备列表)",
                         name
                     ))
                 }

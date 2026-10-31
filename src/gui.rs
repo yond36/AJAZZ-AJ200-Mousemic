@@ -32,6 +32,18 @@ use cpal::traits::{DeviceTrait, HostTrait};
 /// 热键下拉框里的"仅语音"特殊项: 启用该键 AI(长按触发麦克风)但不注入任何按键。
 const VOICE_ONLY: &str = "仅语音(无热键)";
 const DISABLED_KEY: &str = "禁用语音";
+const VOLUME_WHEEL: &str = "按住加滚轮调音量";
+
+fn interception_start_error(driver: &str, dll_path: &std::path::Path) -> Option<String> {
+    if driver == "interception" && !dll_path.is_file() {
+        Some(format!(
+            "无法启动桥接：已选择 Interception 模式，但程序目录中缺少 interception.dll。\n\n请将 interception.dll 放到 MouseMic.exe 所在目录后重新启动桥接，或将注入方式改为 sendinput。\n\n检查路径：{}",
+            dll_path.display()
+        ))
+    } else {
+        None
+    }
+}
 
 /// 把热键下拉选中项拆成 (联动热键名, 仅语音开关):
 /// - "无" → 不联动且禁用 AI;
@@ -39,7 +51,7 @@ const DISABLED_KEY: &str = "禁用语音";
 /// - 热键名 → 联动(绑定热键隐式启用 AI, ai 置 false 由 Config 判定兜底)。
 fn split_hotkey_sel(sel: &str) -> (Option<String>, bool) {
     match sel {
-        "无" | DISABLED_KEY => (None, false),
+        "无" | DISABLED_KEY | VOLUME_WHEEL => (None, false),
         VOICE_ONLY => (None, true),
         other => (Some(other.to_string()), false),
     }
@@ -180,16 +192,19 @@ impl AppState {
     fn load_config(&mut self, cfg: &Config) {
         self.mode_play = cfg.mode == "play";
         self.cable_device = cfg.cable_device.clone();
-        self.hotkey_fwd = match (&cfg.hotkey_forward, cfg.ai_fwd) {
-            (Some(h), _) => h.clone(),
-            (None, true) => VOICE_ONLY.to_string(),
-            (None, false) => DISABLED_KEY.to_string(),
+        let key_selection = |volume, hotkey: &Option<String>, ai| {
+            if volume {
+                VOLUME_WHEEL.to_string()
+            } else {
+                match (hotkey, ai) {
+                    (Some(h), _) if h != "无" => h.clone(),
+                    (_, true) => VOICE_ONLY.to_string(),
+                    _ => DISABLED_KEY.to_string(),
+                }
+            }
         };
-        self.hotkey_bwd = match (&cfg.hotkey_backward, cfg.ai_bwd) {
-            (Some(h), _) => h.clone(),
-            (None, true) => VOICE_ONLY.to_string(),
-            (None, false) => DISABLED_KEY.to_string(),
-        };
+        self.hotkey_fwd = key_selection(cfg.volume_wheel_fwd, &cfg.hotkey_forward, cfg.ai_fwd);
+        self.hotkey_bwd = key_selection(cfg.volume_wheel_bwd, &cfg.hotkey_backward, cfg.ai_bwd);
         self.driver = cfg.driver.clone();
         self.autostart_on = cfg.autostart;
         self.minimize_to_tray = cfg.minimize_to_tray;
@@ -217,6 +232,8 @@ impl AppState {
             hotkey_backward,
             ai_fwd,
             ai_bwd,
+            volume_wheel_fwd: selections.hotkey_fwd == VOLUME_WHEEL,
+            volume_wheel_bwd: selections.hotkey_bwd == VOLUME_WHEEL,
             driver: selections.driver,
             minimize_to_tray: self.minimize_to_tray,
             auto_start_service: self.auto_start_service,
@@ -233,8 +250,8 @@ impl AppState {
                 &selections.auto_enter_delay,
                 self.auto_enter_delay,
             ),
-            typeless_fwd: self.typeless_fwd,
-            typeless_bwd: self.typeless_bwd,
+            typeless_fwd: self.typeless_fwd && selections.hotkey_fwd != VOLUME_WHEEL,
+            typeless_bwd: self.typeless_bwd && selections.hotkey_bwd != VOLUME_WHEEL,
         }
     }
 
@@ -365,7 +382,7 @@ pub struct GuiApp {
     #[nwg_control(parent: settings_frame, size: (164, 28), position: (78, 226))]
     #[nwg_events( OnComboxBoxSelection: [GuiApp::on_persist_setting] )]
     cb_driver: nwg::ComboBox<String>,
-    #[nwg_control(parent: settings_frame, text: "Typeless", position: (280, 230), size: (78, 22))]
+    #[nwg_control(parent: settings_frame, text: "短按模式", position: (280, 230), size: (78, 22))]
     lbl_typeless: nwg::Label,
     #[nwg_control(parent: settings_frame, text: "前进", position: (364, 228), size: (78, 24))]
     #[nwg_events( OnButtonClick: [GuiApp::on_persist_setting] )]
@@ -449,7 +466,7 @@ pub struct GuiApp {
     #[nwg_resource(source_embed: Some(&data.resources), source_embed_id: 1, size: Some((16, 16)))]
     small_icon: nwg::Icon,
     #[nwg_control(parent: window, icon: Some(&data.small_icon), tip: Some("MouseMic · AJAZZ 语音鼠标"))]
-    #[nwg_events( MousePressLeftUp: [GuiApp::tray_show_win], OnContextMenu: [GuiApp::tray_show_menu] )]
+    #[nwg_events( MousePressLeftUp: [GuiApp::tray_toggle_win], OnContextMenu: [GuiApp::tray_show_menu] )]
     tray: nwg::TrayNotification,
     #[nwg_control(parent: window, popup: true)]
     tray_menu: nwg::Menu,
@@ -479,7 +496,11 @@ impl GuiApp {
         state.load_config(&cfg);
 
         // 热键下拉框数据 (无 + 仅语音 + HOTKEY_NAMES)
-        let mut hk = vec![DISABLED_KEY.to_string(), VOICE_ONLY.to_string()];
+        let mut hk = vec![
+            DISABLED_KEY.to_string(),
+            VOICE_ONLY.to_string(),
+            VOLUME_WHEEL.to_string(),
+        ];
         hk.extend(crate::hotkey::HOTKEY_NAMES.iter().map(|s| s.to_string()));
         state.hotkey_items = hk;
         state.driver_items = vec!["sendinput".to_string(), "interception".to_string()];
@@ -677,6 +698,7 @@ impl GuiApp {
 
         drop(st);
         self.update_auto_enter_controls();
+        self.update_key_controls();
         self.update_run_state_ui(false);
         self.ready.set(true);
         self.btn_start.set_focus();
@@ -711,6 +733,14 @@ impl GuiApp {
         } else {
             self.stop_bridge();
             nwg::stop_thread_dispatch();
+        }
+    }
+
+    fn tray_toggle_win(&self) {
+        if self.window.visible() {
+            self.hide_to_tray();
+        } else {
+            self.tray_show_win();
         }
     }
 
@@ -808,6 +838,7 @@ impl GuiApp {
         if !self.ready.get() {
             return;
         }
+        self.update_key_controls();
         let mut st = self.state.borrow_mut();
         st.minimize_to_tray = self.chk_minimize.check_state() == nwg::CheckBoxState::Checked;
         st.auto_start_service = self.chk_autostart_svc.check_state() == nwg::CheckBoxState::Checked;
@@ -821,6 +852,25 @@ impl GuiApp {
     fn save_settings(&self) {
         let saved = self.persist_config();
         self.state.borrow_mut().cable_device = saved.cable_device;
+    }
+
+    fn update_key_controls(&self) {
+        let fwd_volume = self.cb_hotkey_fwd.selection_string().as_deref() == Some(VOLUME_WHEEL);
+        let bwd_volume = self.cb_hotkey_bwd.selection_string().as_deref() == Some(VOLUME_WHEEL);
+        for (checkbox, volume) in [
+            (&self.chk_typeless_fwd, fwd_volume),
+            (&self.chk_typeless_bwd, bwd_volume),
+        ] {
+            checkbox.set_enabled(!volume);
+            if volume {
+                checkbox.set_check_state(nwg::CheckBoxState::Unchecked);
+            }
+        }
+        self.lbl_hotkey_hint.set_text(if fwd_volume || bwd_volume {
+            "按住音量键＋滚轮：上增下减；该键不录音，对所有鼠标生效。"
+        } else {
+            "仅语音：长按录音；按住加滚轮调音量：该键关闭语音，另一键可录音。"
+        });
     }
 
     fn update_auto_enter_controls(&self) {
@@ -1107,17 +1157,7 @@ impl GuiApp {
         ));
 
         // Interception 驱动 (可选) — 检查 DLL + 内核驱动
-        let mut dll = false;
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                if dir.join("interception.dll").exists() {
-                    dll = true;
-                }
-            }
-        }
-        if !dll && std::path::Path::new("interception.dll").exists() {
-            dll = true;
-        }
+        let dll = Config::app_dir().join("interception.dll").is_file();
         let driver = {
             use windows::core::PCWSTR;
             use windows::Win32::Foundation::{CloseHandle, GENERIC_READ};
@@ -1325,6 +1365,15 @@ impl GuiApp {
 
         // 保存与本次启动使用同一份控件快照。
         let cfg = self.persist_config();
+        let dll_path = Config::app_dir().join("interception.dll");
+        if let Some(error) = interception_start_error(&cfg.driver, &dll_path) {
+            self.update_run_state_ui(false);
+            self.lbl_run_hint
+                .set_text("启动已取消：程序目录缺少 interception.dll，详见提示和日志。");
+            self.append_log(&error);
+            show_error_box(&error);
+            return;
+        }
 
         let Some((generation, stop)) = self.state.borrow_mut().begin_run() else {
             return;
@@ -1342,8 +1391,16 @@ impl GuiApp {
             st.log_lines.push(format!(
                 "已启动: 模式={} 前进={} 后退={} 驱动={}",
                 cfg.mode,
-                key_desc(&cfg.hotkey_forward, cfg.ai_fwd),
-                key_desc(&cfg.hotkey_backward, cfg.ai_bwd),
+                if cfg.volume_wheel_fwd {
+                    VOLUME_WHEEL.to_string()
+                } else {
+                    key_desc(&cfg.hotkey_forward, cfg.ai_fwd)
+                },
+                if cfg.volume_wheel_bwd {
+                    VOLUME_WHEEL.to_string()
+                } else {
+                    key_desc(&cfg.hotkey_backward, cfg.ai_bwd)
+                },
                 cfg.driver
             ));
         }
@@ -1424,7 +1481,7 @@ impl GuiApp {
     }
 }
 
-/// GUI 入口 (由 main 在启用 gui feature 时调用)。
+/// GUI 入口。
 pub fn run(autostart: bool) {
     if !single_instance::try_acquire() {
         single_instance::bring_existing_to_front();
@@ -1478,6 +1535,30 @@ mod tests {
             msg_rx: Some(rx),
             ..AppState::default()
         }
+    }
+
+    #[test]
+    fn interception_requires_a_dll_file_before_starting() {
+        let dir = std::env::temp_dir().join(format!(
+            "mousemic-dll-check-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let dll = dir.join("interception.dll");
+        let error = interception_start_error("interception", &dll).unwrap();
+        assert!(error.contains(&dll.display().to_string()));
+        assert!(interception_start_error("sendinput", &dll).is_none());
+        std::fs::create_dir(&dll).unwrap();
+        assert!(interception_start_error("interception", &dll).is_some());
+        std::fs::remove_dir(&dll).unwrap();
+        std::fs::write(&dll, b"presence check only").unwrap();
+        assert!(interception_start_error("interception", &dll).is_none());
+        std::fs::remove_file(&dll).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 
     #[test]
@@ -1560,6 +1641,42 @@ mod tests {
         });
         assert_eq!(st.hotkey_fwd, DISABLED_KEY);
         assert_eq!(st.hotkey_bwd, VOICE_ONLY);
+    }
+
+    #[test]
+    fn volume_selection_roundtrips_and_excludes_voice_and_typeless() {
+        let st = AppState {
+            typeless_fwd: true,
+            typeless_bwd: true,
+            ..AppState::default()
+        };
+        let cfg = st.config_from_selections(ConfigSelections {
+            cable_device: "CABLE Input".into(),
+            hotkey_fwd: VOLUME_WHEEL.into(),
+            hotkey_bwd: VOICE_ONLY.into(),
+            driver: "sendinput".into(),
+            auto_enter: false,
+            auto_enter_mode: None,
+            auto_enter_delay: "0.5".into(),
+        });
+        assert!(cfg.volume_wheel_fwd);
+        assert!(!cfg.volume_wheel_bwd);
+        assert!(cfg.hotkey_forward.is_none());
+        assert!(!cfg.ai_forward_enabled());
+        assert!(!cfg.typeless_fwd);
+        assert!(cfg.ai_backward_enabled());
+        let mut restored = AppState::default();
+        restored.load_config(&cfg);
+        assert_eq!(restored.hotkey_fwd, VOLUME_WHEEL);
+        assert_eq!(restored.hotkey_bwd, VOICE_ONLY);
+        // Even hand-edited contradictory config must display the active volume purpose.
+        let conflicting = Config {
+            hotkey_backward: Some("R_alt".into()),
+            volume_wheel_bwd: true,
+            ..cfg
+        };
+        restored.load_config(&conflicting);
+        assert_eq!(restored.hotkey_bwd, VOLUME_WHEEL);
     }
 
     #[test]

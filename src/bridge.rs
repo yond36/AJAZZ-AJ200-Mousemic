@@ -162,6 +162,9 @@ pub struct Bridge {
     ai_fwd: bool,
     /// 后退键 AI 语音开关(独立于热键)。
     ai_bwd: bool,
+    volume_wheel_fwd: bool,
+    volume_wheel_bwd: bool,
+    volume_wheel: Option<crate::volume_wheel::VolumeWheel>,
     n_pkts: u64,
     n_dec_ok: u64,
     n_dec_fail: u64,
@@ -211,10 +214,16 @@ impl Bridge {
             }
         };
 
-        let (hotkey_fwd, hotkey_fwd_name) =
-            mk_hotkey(&config.hotkey_forward, &config.driver, "前进", log);
-        let (hotkey_bwd, hotkey_bwd_name) =
-            mk_hotkey(&config.hotkey_backward, &config.driver, "后退", log);
+        let (hotkey_fwd, hotkey_fwd_name) = if config.volume_wheel_fwd {
+            (None, None)
+        } else {
+            mk_hotkey(&config.hotkey_forward, &config.driver, "前进", log)
+        };
+        let (hotkey_bwd, hotkey_bwd_name) = if config.volume_wheel_bwd {
+            (None, None)
+        } else {
+            mk_hotkey(&config.hotkey_backward, &config.driver, "后退", log)
+        };
 
         Ok(Bridge {
             api,
@@ -235,8 +244,11 @@ impl Bridge {
             hotkey_fwd_name,
             hotkey_bwd,
             hotkey_bwd_name,
-            ai_fwd: config.ai_fwd,
-            ai_bwd: config.ai_bwd,
+            ai_fwd: config.ai_fwd && !config.volume_wheel_fwd,
+            ai_bwd: config.ai_bwd && !config.volume_wheel_bwd,
+            volume_wheel_fwd: config.volume_wheel_fwd,
+            volume_wheel_bwd: config.volume_wheel_bwd,
+            volume_wheel: None,
             n_pkts: 0,
             n_dec_ok: 0,
             n_dec_fail: 0,
@@ -262,6 +274,9 @@ impl Bridge {
     }
 
     fn disconnect(&mut self) {
+        if let Some(volume) = &self.volume_wheel {
+            volume.reset();
+        }
         self.finish_hotkey_session();
         if let Some(hk) = &mut self.hotkey_fwd {
             hk.release();
@@ -279,7 +294,7 @@ impl Bridge {
         // 仅在确有关联设备 (已知链路) 时才发禁用命令: current_path 为空说明本就
         // 未连接或已清空, 此时写固件是对 stale/无效句柄的无效操作, 跳过。
         if self.current_path.is_some() {
-            if let Some(ctrl) = self.control.as_ref().or(self.cmd.as_ref()) {
+            if let Some(ctrl) = self.cmd.as_ref().or(self.control.as_ref()) {
                 // 发送禁用 AI 键命令, 恢复前进/后退默认行为
                 hid::ai_off(ctrl);
             }
@@ -469,12 +484,15 @@ impl Bridge {
     ///
     /// 启用判定 = 绑定热键 **或** 独立 AI 开关(仅语音模式): 两者解耦, 允许
     /// "长按触发麦克风但不注入任何按键"。未启用的键长按恢复默认浏览器前进/后退。
-    fn apply_ai_config(&mut self, debug: bool, log: &dyn Fn(&str)) {
-        if let Some(ctrl) = self.control.as_ref().or(self.cmd.as_ref()) {
+    fn apply_ai_config(&mut self, debug: bool, log: &dyn Fn(&str)) -> bool {
+        if let Some(ctrl) = self.cmd.as_ref().or(self.control.as_ref()) {
             let fwd = self.hotkey_fwd_name.is_some() || self.ai_fwd;
             let bwd = self.hotkey_bwd_name.is_some() || self.ai_bwd;
             std::thread::sleep(Duration::from_millis(50));
-            hid::set_ai_keys(ctrl, fwd, bwd);
+            if !hid::set_ai_keys(ctrl, fwd, bwd) {
+                log("AI 键配置写入失败；保留已连接的音频链路。侧键用途未确认生效，请停止后重试。");
+                return false;
+            }
             if debug {
                 let fmt = |enabled: bool, name: &Option<String>| -> String {
                     if !enabled {
@@ -491,8 +509,10 @@ impl Bridge {
                     fmt(bwd, &self.hotkey_bwd_name)
                 ));
             }
-        } else if debug {
+            true
+        } else {
             log("未找到 control 接口 (usage_page=0xFFA0), AI键配置无法生效");
+            false
         }
     }
 
@@ -616,6 +636,22 @@ impl Bridge {
             return Err(anyhow::anyhow!(
                 "未找到可用的鼠标音频 HID 接口。请确认鼠标已连接。"
             ));
+        }
+        // 先连接并写入互斥 AI 配置, 再启用鼠标组合。
+        self.volume_wheel = Some(
+            match crate::volume_wheel::VolumeWheel::start(
+                self.volume_wheel_fwd,
+                self.volume_wheel_bwd,
+            ) {
+                Ok(service) => service,
+                Err(e) => {
+                    self.disconnect();
+                    return Err(e.context("启动滚轮调音量失败"));
+                }
+            },
+        );
+        if self.volume_wheel_fwd || self.volume_wheel_bwd {
+            log("滚轮调音量已启用：按住所选侧键，上滚增大、下滚减小；该键语音已关闭。此组合对所有鼠标生效。");
         }
         log(&format!(
             "已连接 ({}模式), 等待语音键...",
@@ -860,7 +896,8 @@ impl Bridge {
             }
         }
 
-        // 退出时恢复 AI 键为默认 (禁用)
+        // 退出时先卸载滚轮 hook, 再恢复 AI 键为默认 (禁用)。
+        self.volume_wheel.take();
         self.disconnect();
 
         if self.audio_started {
@@ -877,6 +914,7 @@ impl Bridge {
 
 impl Drop for Bridge {
     fn drop(&mut self) {
+        self.volume_wheel.take();
         self.disconnect();
     }
 }

@@ -329,7 +329,30 @@ fn send_ai_report(
     fw_short: u8,
     fw_long: u8,
 ) -> bool {
-    let mut report = [0u8; 32];
+    let report = build_ai_report(mask, enable, bw_short, bw_long, fw_short, fw_long);
+    match control.write(&report) {
+        Ok(n) if n == report.len() => true,
+        Ok(n) => {
+            log::warn!("AI 配置报告写入不完整: {n}/{}", report.len());
+            false
+        }
+        Err(e) => {
+            log::warn!("AI 配置报告写入失败: {e}");
+            false
+        }
+    }
+}
+
+fn build_ai_report(
+    mask: u8,
+    enable: u8,
+    bw_short: u8,
+    bw_long: u8,
+    fw_short: u8,
+    fw_long: u8,
+) -> [u8; 64] {
+    // 与已成功握手的命令通道使用相同的 64 字节报告长度。
+    let mut report = [0u8; 64];
     report[0] = 0x0b;
     report[1] = 0x55;
     report[2] = 0x1a;
@@ -343,30 +366,40 @@ fn send_ai_report(
     for (i, b) in payload.iter().enumerate() {
         report[6 + i] = *b;
     }
-    control.write(&report).unwrap_or(0) == 32
+    report
 }
 
 /// 设置 AI 键: fwd=true 启用前进键AI, bwd=true 启用后退键AI。
-/// 启用时直接发对应 mask 的 enable 命令, 不影响未选中的键;
+/// 混合用途时先明确禁用另一键, 清除 ARM 或先前配置留下的 AI 状态。
 /// 全禁 (fwd=false, bwd=false) 用于停止时恢复默认前进/后退。
 pub fn set_ai_keys(control: &HidDevice, fwd: bool, bwd: bool) -> bool {
+    configure_ai_keys(fwd, bwd, |mask, enable, bs, bl, fs, fl| {
+        send_ai_report(control, mask, enable, bs, bl, fs, fl)
+    })
+}
+
+fn configure_ai_keys(
+    fwd: bool,
+    bwd: bool,
+    mut send: impl FnMut(u8, u8, u8, u8, u8, u8) -> bool,
+) -> bool {
     match (fwd, bwd) {
         (false, false) => {
             // 停止: 禁用全部 AI 键, 恢复默认 (bwShort=1,bwLong=1, fwShort=2,fwLong=2)
-            send_ai_report(control, 0x18, 0x00, 1, 1, 2, 2)
+            send(0x18, 0x00, 1, 1, 2, 2)
         }
         (true, true) => {
             // 两键都启用 AI: 短按保持默认 (bw=1, fw=2), 长按=语音 (0)。
             // 与激活序列 (ARM) 的行为字节一致, 保证短按功能任何情况下都不变。
-            send_ai_report(control, 0x18, 0x01, 1, 0, 2, 0)
+            send(0x18, 0x01, 1, 0, 2, 0)
         }
         (true, false) => {
             // 仅前进=AI (mask=0x10): 前进短按默认(2)/长按语音(0), 后退完全默认 (1,1)
-            send_ai_report(control, 0x10, 0x01, 1, 1, 2, 0)
+            send(0x08, 0x00, 1, 1, 2, 0) && send(0x10, 0x01, 1, 1, 2, 0)
         }
         (false, true) => {
             // 仅后退=AI (mask=0x08): 后退短按默认(1)/长按语音(0), 前进完全默认 (2,2)
-            send_ai_report(control, 0x08, 0x01, 1, 0, 2, 2)
+            send(0x10, 0x00, 1, 0, 2, 2) && send(0x08, 0x01, 1, 0, 2, 2)
         }
     }
 }
@@ -578,6 +611,71 @@ pub fn list_hid(log: &dyn Fn(&str)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_report_matches_successful_arm_command_format() {
+        let report = build_ai_report(0x18, 1, 1, 0, 2, 0);
+        assert_eq!(report, *build_arm_seq().last().unwrap());
+        let disabled = build_ai_report(0x18, 0, 1, 1, 2, 2);
+        assert_eq!(&disabled[..6], &[0x0b, 0x55, 0x1a, 0x18, 0, 1]);
+        assert!(disabled[28..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn ai_configuration_replaces_armed_and_previous_states() {
+        for initial in [0, 0x08, 0x10, 0x18] {
+            for (fwd, bwd, expected) in [
+                (false, false, 0),
+                (true, false, 0x10),
+                (false, true, 0x08),
+                (true, true, 0x18),
+            ] {
+                let mut enabled = initial;
+                let mut reports = Vec::new();
+                assert!(configure_ai_keys(
+                    fwd,
+                    bwd,
+                    |mask, enable, bs, bl, fs, fl| {
+                        if enable == 0 {
+                            enabled &= !mask;
+                        } else {
+                            enabled |= mask;
+                        }
+                        reports.push((mask, enable, bs, bl, fs, fl));
+                        true
+                    }
+                ));
+                assert_eq!(enabled, expected);
+                if fwd != bwd {
+                    assert_eq!(reports.len(), 2);
+                    assert_eq!(reports[0].1, 0);
+                    assert_eq!(reports[1].1, 1);
+                }
+                let (_, _, bs, bl, fs, fl) = *reports.last().unwrap();
+                assert_eq!((bs, fs), (1, 2));
+                assert_eq!(bl, if bwd { 0 } else { 1 });
+                assert_eq!(fl, if fwd { 0 } else { 2 });
+            }
+        }
+    }
+
+    #[test]
+    fn ai_configuration_stops_after_failed_disable() {
+        for (fwd, bwd) in [(true, false), (false, true)] {
+            let mut calls = 0;
+            assert!(!configure_ai_keys(fwd, bwd, |_, _, _, _, _, _| {
+                calls += 1;
+                false
+            }));
+            assert_eq!(calls, 1);
+            let mut calls = 0;
+            assert!(!configure_ai_keys(fwd, bwd, |_, _, _, _, _, _| {
+                calls += 1;
+                calls == 1
+            }));
+            assert_eq!(calls, 2);
+        }
+    }
 
     #[test]
     fn matches_only_known_physical_containers() {

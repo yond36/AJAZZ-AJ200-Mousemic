@@ -26,10 +26,9 @@ pub mod hid;
 pub mod hotkey;
 pub mod msbc;
 pub mod single_instance;
+pub mod volume_wheel;
 
-#[cfg(feature = "gui")]
 pub mod gui;
-#[cfg(feature = "gui")]
 pub mod gui_theme;
 
 /// 鼠标厂商/音频常量 (与 Python 版保持一致)。

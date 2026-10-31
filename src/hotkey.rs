@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-/// 可选热键名列表 (供 GUI 下拉 / CLI 校验)。
+/// 可选热键名列表 (供 GUI 下拉选择)。
 pub const HOTKEY_NAMES: &[&str] = &[
     "L_alt",
     "R_alt",

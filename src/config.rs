@@ -34,6 +34,12 @@ pub struct Config {
     /// 后退键 AI 语音开关(独立于热键), 语义同 ai_fwd。
     #[serde(default)]
     pub ai_bwd: bool,
+    /// 前进键配合滚轮调系统音量; 与该键的 AI 语音/热键互斥。
+    #[serde(default)]
+    pub volume_wheel_fwd: bool,
+    /// 后退键配合滚轮调系统音量; 与该键的 AI 语音/热键互斥。
+    #[serde(default)]
+    pub volume_wheel_bwd: bool,
     /// 热键注入方式: "sendinput" | "interception"。
     pub driver: String,
     /// 启动时最小化到托盘 (配合 --autostart / 开机自启使用; 运行中关闭窗口始终收进托盘)。
@@ -74,9 +80,11 @@ impl Default for Config {
             hotkey_forward: Some("R_alt".to_string()),
             hotkey_backward: None,
             // 默认关闭: 旧配置无此字段 → 保持旧行为(仅绑了热键的键启用语音)。
-            // 勾选 GUI 的"仅语音(无热键)"或 CLI 不带 --hotkey 时置 true。
+            // 在 GUI 选择"仅语音(无热键)"时置 true。
             ai_fwd: false,
             ai_bwd: false,
+            volume_wheel_fwd: false,
+            volume_wheel_bwd: false,
             driver: default_driver(),
             minimize_to_tray: false,
             auto_start_service: false,
@@ -137,12 +145,12 @@ impl Config {
 
     /// 前进键 AI(语音)是否启用: 绑定了联动热键, 或独立开关 ai_fwd 开启(仅语音模式)。
     pub fn ai_forward_enabled(&self) -> bool {
-        Self::hotkey_bound(&self.hotkey_forward) || self.ai_fwd
+        !self.volume_wheel_fwd && (Self::hotkey_bound(&self.hotkey_forward) || self.ai_fwd)
     }
 
     /// 后退键 AI(语音)是否启用: 绑定了联动热键, 或独立开关 ai_bwd 开启(仅语音模式)。
     pub fn ai_backward_enabled(&self) -> bool {
-        Self::hotkey_bound(&self.hotkey_backward) || self.ai_bwd
+        !self.volume_wheel_bwd && (Self::hotkey_bound(&self.hotkey_backward) || self.ai_bwd)
     }
 
     pub fn load() -> Config {
@@ -242,6 +250,39 @@ mod tests {
         c.hotkey_backward = Some("无".to_string());
         c.ai_bwd = false; // 复位之前设的仅语音开关
         assert!(!c.ai_backward_enabled());
+    }
+
+    #[test]
+    fn volume_keys_override_conflicting_voice_settings_independently() {
+        let mut c = Config {
+            ai_fwd: true,
+            ai_bwd: true,
+            volume_wheel_fwd: true,
+            ..Config::default()
+        };
+        assert!(!c.ai_forward_enabled());
+        assert!(c.ai_backward_enabled());
+        c.volume_wheel_bwd = true;
+        c.hotkey_backward = Some("R_alt".into());
+        assert!(!c.ai_backward_enabled());
+        c.volume_wheel_fwd = false;
+        assert!(c.ai_forward_enabled());
+    }
+
+    #[test]
+    fn old_configs_leave_volume_gestures_disabled() {
+        let cfg: Config = serde_json::from_str(r#"{"ai_bwd":true}"#).unwrap();
+        assert!(!cfg.volume_wheel_fwd);
+        assert!(!cfg.volume_wheel_bwd);
+        assert!(cfg.ai_backward_enabled());
+        let cfg = Config {
+            volume_wheel_fwd: true,
+            volume_wheel_bwd: true,
+            ..cfg
+        };
+        let restored: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(restored.volume_wheel_fwd && restored.volume_wheel_bwd);
+        assert!(!restored.ai_forward_enabled() && !restored.ai_backward_enabled());
     }
 
     #[test]

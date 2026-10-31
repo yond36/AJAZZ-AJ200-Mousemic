@@ -1,6 +1,6 @@
 [package]
 name = "mousemic-rs"
-version = "1.4.9"
+version = "1.5.0"
 edition = "2021"
 description = "AJAZZ 语音鼠标 (VID=363C) 桥接为普通麦克风 — Rust 重写版"
 license = "MIT"
@@ -14,13 +14,6 @@ path = "src/lib.rs"
 name = "MouseMic"
 path = "src/main.rs"
 
-[features]
-default = ["gui"]
-# gui: 启用 native-windows-gui 原生 Win32 图形界面 + 系统托盘。
-# 用 GDI 原生控件 (系统字体, 不读字体文件进内存), 内存占用远低于 egui GPU 方案。
-# 关闭后可只构建命令行/库 (cargo build --no-default-features)。
-gui = ["dep:native-windows-gui", "dep:native-windows-derive"]
-
 [dependencies]
 # HID 通信 (封装 hidapi C 库, 构建时需 C 编译器)
 hidapi = "2.6"
@@ -29,12 +22,8 @@ cpal = "0.15"
 # 配置 (JSON 序列化)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 命令行解析
-clap = { version = "4", features = ["derive"] }
 # 错误处理
 anyhow = "1"
-# Ctrl+C 干净退出 (headless CLI)
-ctrlc = "3"
 # 日志
 log = "0.4"
 simplelog = "0.12"
@@ -49,7 +38,6 @@ windows = { version = "0.58", features = [
     "Win32_UI_Controls",
     "Win32_Graphics_Gdi",
     "Win32_System_Threading",
-    "Win32_System_Console",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
@@ -58,10 +46,10 @@ windows = { version = "0.58", features = [
 # 运行时动态加载 (仅 hotkey.rs 的 Interception 驱动后端使用)
 libloading = "0.8"
 
-# GUI (可选, 受 gui feature 控制): 原生 Win32 控件 (native-windows-gui),
+# GUI: 原生 Win32 控件 (native-windows-gui),
 # 用系统 GDI 字体, 不把字体文件读进内存, 运行时内存开销极小。
-native-windows-gui = { version = "1.0", optional = true }
-native-windows-derive = { version = "1.0", optional = true }
+native-windows-gui = "1.0"
+native-windows-derive = "1.0"
 
 [build-dependencies]
 # 静态编译 vendored sbc (BlueZ SBC/mSBC codec, nefarius/libsbc fork) 供 msbc 模块 FFI

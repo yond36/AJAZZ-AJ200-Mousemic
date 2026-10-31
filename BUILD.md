@@ -3,7 +3,7 @@
 本目录是用 Rust 对原 Python 版 MouseMic（AJAZZ 语音鼠标的 mSBC→PCM 桥接）的完整重写。
 本文记录**已验证可编译/测试/构建**的环境与步骤，并收录编译期踩过的 API 坑，避免重建时重蹈覆辙。
 
-当前版本：**v1.4.9**（与 `Cargo.toml` / `Cargo.lock` 一致）。
+当前版本：**v1.5.0**（与 `Cargo.toml` / `Cargo.lock` 一致）。
 
 ## 1. 先决条件（本机 Windows）
 
@@ -38,21 +38,20 @@ mSBC 解码**不再依赖 `libsbc.dll`，也不用 `mini_sbc` crate**。实现�
 
 ```sh
 # 在仓库根目录执行（无需 cd）
-# 仅构建无 GUI 的核心库 + CLI（用于快速校验 / 无头运行）
-cargo build --release --no-default-features
-cargo test  --no-default-features      # 单元测试 + golden 向量测试
-
-# 完整 GUI 版（native-windows-gui，默认 feature）
-cargo build --release                  # 产物 target/release/MouseMic.exe (~1.4MB)
-cargo test                             # 含 GUI 的完整测试
+# 构建 GUI 应用（native-windows-gui）
+cargo build --release                  # 产物 target/release/MouseMic.exe
+cargo test                             # 核心模块、GUI 与 golden 向量测试
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
 编译目标：`x86_64-pc-windows-msvc`。需要 Rust 1.82+。
 
-**测试内容**（默认 GUI 特性共 37 个；无 GUI 特性共 31 个，全部通过）：
-- 默认特性含 35 个单元测试：设备与 HID 匹配、激活取消、mSBC 坏帧与截断输入、
-  热键会话与链路切换、配置采集、GUI 运行代次隔离及热键选项兼容性。
-- 无 GUI 特性包含其中 29 个核心单元测试。
+**测试内容**：
+- 单元测试覆盖设备与 HID 匹配、激活取消、mSBC 坏帧与截断输入、
+  热键会话与链路切换、配置采集、GUI 运行代次隔离及热键选项兼容性；
+  还包含 AI 配置覆盖握手状态及写入失败回归测试，以及侧键音量的双键交错、
+  滚轮余量、点击回放判定、断连重置及配置互斥。
+- 手势状态测试不注入系统输入，不能替代实体鼠标验证。
 - 集成测试 2 个（`tests/golden.rs`）：
   - `decode_golden_vectors`：用 vendored sbc 解码 `tests/data/msbc_frames.bin`（240 帧，
     含静音/1kHz 正弦/白噪声/混合段），与 `pcm_ref.s16le`（由 `tests/data/gen_vectors.py`
@@ -63,51 +62,24 @@ cargo test                             # 含 GUI 的完整测试
 注：若 `target/release/MouseMic.exe` 正在运行，`cargo build --release` 会因 exe 被占用
 报 `failed to remove file ... 拒绝访问 (os error 5)`——先退出运行中的实例再重新构建。
 
-## 4. 运行（无头诊断模式，无需 GUI / 显示器）
+## 4. 运行 GUI 应用
 
-```sh
-# 列出音频输出设备（虚拟声卡通常叫 "CABLE Input (VB-Audio Virtual Cable)"）
-MouseMic.exe --list
+双击或无参数运行 `MouseMic.exe`，打开 native-windows-gui 原生 Win32 窗口。
+在界面选择“扬声器试听”或“虚拟麦克风”，设置输出设备与各侧键功能，然后启动桥接。
+音频设备列表、HID 诊断及运行日志都在 GUI 中查看。
 
-# 列出 HID 设备，识别 AJAZZ 鼠标的音频/命令通道/电池接口
-MouseMic.exe --list-hid
-
-# 把真鼠标语音桥接到指定虚拟声卡输入（虚拟麦克风模式）
-# 不传 --hotkey → 前进/后退键为"仅语音"模式：长按触发麦克风，不注入按键（纯麦克风用法）
-MouseMic.exe --cable "CABLE Input"
-
-# 直接播放到系统默认扬声器（扬声器试听模式）
-MouseMic.exe --play
-
-# 录音到 WAV 文件（按住语音键录音，Ctrl+C 结束）
-MouseMic.exe --file capture.wav
-
-# 联动热键（须与 --play / --cable / --file 搭配；单个 --hotkey 同时作用于前进/后退两键）
-MouseMic.exe --cable "CABLE Input" --hotkey R_alt+space
-MouseMic.exe --play --hotkey f9 --driver interception
-
-# 开机自启入口：启动 GUI 后自动起桥接并收进托盘（由注册表调用，勿手动运行）
-MouseMic.exe --autostart
-```
-
-可选参数：
-- `--hotkey NAME`：联动热键名，可选 `L_alt R_alt R_ctrl R_shift f9 f10 space grave capslock
-  R_alt+space R_alt+R_shift R_alt+R_ctrl`。
-- `--driver sendinput|interception`：热键注入方式，默认 `sendinput`；
-  `interception` 需要安装 Interception 驱动且把 `interception.dll` 放在 exe 同目录。
-
-> **仅语音模式（v1.4.4+）**：CLI 不传 `--hotkey` 时，前进/后退键都启用 AI 语音
-> （长按触发麦克风）但不注入任何按键，`--cable` / `--play` / `--file` 可直接当纯麦克风用。
-> GUI 里在对应键的热键下拉选 **“仅语音(无热键)”** 即可对该键单独启用。
-> 配置字段：`ai_fwd` / `ai_bwd`（独立于热键绑定的 AI 开关，默认 false 保持旧行为）。
-
-无参数运行 `MouseMic.exe` 启动 GUI（native-windows-gui 原生 Win32 窗口 + 系统托盘）。
+- **仅语音模式**：在对应键的热键下拉框选择 **“仅语音(无热键)”**，长按触发麦克风但不注入按键。
+  配置字段为 `ai_fwd` / `ai_bwd`（独立于热键绑定的 AI 开关，默认 false 保持旧行为）。
+- **热键驱动**：界面可选择 `sendinput` 或 `interception`；后者需要安装 Interception
+  驱动，并把 `interception.dll` 放在 exe 同目录。
+- **开机自启**：在界面勾选开机自启，由注册表以 `MouseMic.exe --autostart` 启动，
+  自动起桥接并收进托盘。程序只接受这个启动参数。
 
 ## 5. 架构速览（模块划分）
 
 ```
 src/
-├── main.rs          入口：CLI 解析 + headless 桥接 / GUI 启动；内嵌极简 WAV 写入器
+├── main.rs          GUI 启动入口；识别注册表开机自启参数 --autostart
 ├── lib.rs           crate 根：模块声明 + 常量（VID、usage_page、ReportID、16kHz 采样率）
 ├── hid.rs           HID 枚举、激活握手 (ARM_SEQ)、命令通道自动探测、有线/无线分类、
 │                    AI 键配置 (set_ai_keys)、电池上报解析
@@ -115,12 +87,11 @@ src/
 ├── audio.rs         cpal/WASAPI 输出 + 线性重采样器（16k → 设备率，默认 f32 路径）
 ├── bridge.rs        主桥接循环：收帧→解码→输出→热键联动→断线重连→自动回车
 ├── hotkey.rs        SendInput / Interception 双后端热键注入（组合键、typeless 短按）
+├── volume_wheel.rs  全局侧键＋滚轮音量监听、点击回放、断连状态重置（SendInput）
 ├── config.rs        JSON 配置 (mousemic_gui.json，向后兼容旧配置) + 注册表自启；
 │                    前进/后退独立 AI 开关 (ai_fwd/ai_bwd，仅语音模式)
 ├── devices.rs       AJ200 系列 PID 白名单设备注册表（21 个 PID / 22 条记录）
-├── gui.rs           native-windows-gui 双栏面板 + 系统托盘（受 gui feature 控制）
-├── gui_theme.rs     GDI 原生控件主题、主次按钮与高对比度回退（受 gui feature 控制）
-├── single_instance.rs  命名互斥量 (Global\mousemic_single) 防多开
+├── gui.rs           native-windows-gui 双栏面板 + 系统托盘├── gui_theme.rs     GDI 原生控件主题、主次按钮与高对比度回退├── single_instance.rs  命名互斥量 (Global\mousemic_single) 防多开
 ├── dialog.rs        MessageBox 错误弹窗 + panic hook（发布版无控制台时兜底）
 └── error.rs         anyhow 错误别名
 
@@ -141,7 +112,7 @@ tests/data/          msbc_frames.bin / pcm_ref.s16le / gen_vectors.py / vectors.
 ## 6. 编译期踩坑记录（已修复，留档备查）
 
 依赖版本：`hidapi 2.6` / `cpal 0.15` / `windows 0.58` / `libloading 0.8` /
-`native-windows-gui 1.0` / `clap 4` / `anyhow 1` / `winreg 0.52`。
+`native-windows-gui 1.0` / `anyhow 1` / `winreg 0.52`。
 
 ### anyhow
 - `anyhow!` 宏需 crate 级可用：`lib.rs` 顶部 `#[macro_use] extern crate anyhow;`
@@ -221,7 +192,7 @@ tests/data/          msbc_frames.bin / pcm_ref.s16le / gen_vectors.py / vectors.
 GUI 启动后按住鼠标语音键却无声，按优先级排查：
 1. **先看 GUI 日志面板**（每按一次键/每秒都会打）：
    - 出现 `音频输出设备: <名>` → 音频设备已成功打开；若显示 `音频设备错误: 找不到输出设备...`
-     说明设备名没匹配上（默认 cable 模式找 `CABLE Input`，用 `--list` 或 GUI“刷新音频设备”核对真实名）。
+     说明设备名没匹配上（cable 模式默认找 `CABLE Input`，用 GUI“刷新音频设备”核对真实名）。
    - 按住语音键后出现 `语音包=... 解码OK=... 失败=... 队列≈...` 且 `语音包` 在涨 →
       **HID 数据在流、解码在工作**，问题在音频输出/监听；若 `语音包` 始终为 0 →
      鼠标没在发音频包（ARM 激活失败 / 链路不对 / 键位不对）。
@@ -229,8 +200,6 @@ GUI 启动后按住鼠标语音键却无声，按优先级排查：
 2. **模式混淆（最常见）**：默认 `mode=cable` 把声音送进 **VB-CABLE 输入端**，**默认不直接出声**；
    要么在会议/录音软件里把 “CABLE Output” 选作麦克风，要么在 Windows 声音设置开启该设备“监听”。
    想直接听到声音做验证，先把输出模式切到 **“扬声器试听”(play)** 再按语音键。
-3. **CLI 直连扬声器验证（绕过 GUI）**：`MouseMic.exe --play`，从命令行窗口看日志、按住键听扬声器。
-   若 `--play` 有声而 GUI cable 无声 → 纯属第 2 点的监听问题，不是 bug。
 
 ### “有语音包但只一下杂音后静音” 的精确定位（日志诊断）
 

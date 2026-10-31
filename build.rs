@@ -35,9 +35,7 @@ fn main() {
 
     b.compile("sbc");
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && std::env::var("CARGO_FEATURE_GUI").is_ok()
-    {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut resource = winresource::WindowsResource::new();
         resource.set_icon("assets/mousemic.ico");
         resource
